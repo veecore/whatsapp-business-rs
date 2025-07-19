@@ -6,7 +6,7 @@
 # ⚡️ whatsapp-business-rs
 [![Crates.io](https://img.shields.io/crates/v/whatsapp-business-rs)](https://crates.io/crates/whatsapp-business-rs)
 [![Docs.rs](https://docs.rs/whatsapp-business-rs/badge.svg)](https://docs.rs/whatsapp-business-rs)
-[![CI](https://github.com/veecore/whatsapp-business-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/veecore/whatsapp-business-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/veecore/whatsapp-business-rs/actions/workflows/ci.yaml/badge.svg)](https://github.com/veecore/whatsapp-business-rs/actions/workflows/ci.yaml)
 
 ### The ultimate Rust SDK for building badass WhatsApp Business integrations.
 

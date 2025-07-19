@@ -1,7 +1,7 @@
 #![allow(private_bounds)]
 #![allow(private_interfaces)]
 #![deny(clippy::future_not_send)]
-#![cfg_attr(feature = "nightly", feature(impl_trait_in_assoc_type))]
+#![cfg_attr(nightly_rust, feature(impl_trait_in_assoc_type))]
 
 //! # whatsapp_business_rs
 //!

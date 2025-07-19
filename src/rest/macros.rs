@@ -60,7 +60,7 @@ macro_rules! IntoFuture {
             pub async fn $func($($args)*) -> $ret $body
         }
 
-        #[cfg(feature = "nightly")]
+        #[cfg(nightly_rust)]
         impl $(<$($lt,)? $($gen),*>)? ::std::future::IntoFuture for $name $(<$($lt2,)? $($gen2),*>)?
         $(where $($wheres)*)?
         {
@@ -72,7 +72,7 @@ macro_rules! IntoFuture {
             }
         }
 
-        #[cfg(not(feature = "nightly"))]
+        #[cfg(not(nightly_rust))]
         impl $(<$($lt,)? $($gen),*>)? ::std::future::IntoFuture for $name $(<$($lt2,)? $($gen2),*>)?
         $(where $($wheres)*)?
         {
