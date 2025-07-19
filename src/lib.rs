@@ -1,0 +1,976 @@
+#![allow(private_bounds)]
+#![allow(private_interfaces)]
+#![deny(clippy::future_not_send)]
+#![cfg_attr(feature = "nightly", feature(impl_trait_in_assoc_type))]
+
+//! # whatsapp_business_rs
+//!
+//! A comprehensive Rust SDK for interacting with the Meta WhatsApp Business Platform.
+//! This crate provides robust and type-safe abstractions for sending and receiving WhatsApp messages,
+//! managing WhatsApp Business Accounts (WABAs), configuring webhooks, and handling product catalogs.
+//!
+//! ## ✨ Features
+//!
+//! - **Message Management**: Construct, send, and receive various message types, including text, media,
+//!   interactive messages (buttons, lists), and reactions.
+//! - **Client API**: A fluent builder for authenticating and managing interactions with the WhatsApp Business API.
+//! - **Webhook Server**: Easily set up a webhook server to receive and process incoming messages and
+//!   message status updates with signature validation.
+//! - **App Management**: Configure webhook subscriptions and manage onboarding flows for connecting businesses to your app.
+//! - **WABA Management**: Administer your WhatsApp Business Account, including listing catalogs,
+//!   managing phone numbers, and running guided phone number registration flows.
+//! - **Catalog Management**: Programmatically manage your product catalogs, allowing you to list,
+//!   create, and update products.
+//!
+//! ## 🚀 Examples
+//!
+//! Here are some quick examples to get you started:
+//!
+//! ### Send a Simple Text Message
+//! ```rust,no_run
+//! use whatsapp_business_rs::message::Draft;
+//! use whatsapp_business_rs::Client;
+//!
+//! # async fn send_text_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = Client::new("YOUR_ACCESS_TOKEN").await?; // Initialize your client
+//! client.message("YOUR_BUSINESS_NUMBER_ID") // Replace with your WhatsApp Number ID
+//!       .send("+16012345678", "Hello from Rust! How can I help you today?") // Replace with recipient's phone number
+//!       .await?;
+//! println!("Text message sent!");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ---
+//!
+//! ### Create a Client
+//! ```rust,no_run
+//! use std::time::Duration;
+//! use whatsapp_business_rs::client::Client;
+//!
+//! # async fn create_client_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = Client::builder()
+//!       .timeout(Duration::from_secs(15))
+//!       .api_version("v19.0")
+//!       .connect("YOUR_ACCESS_TOKEN")
+//!       .await?;
+//! # Ok(()) }
+//! ```
+//!
+//! ---
+//!
+//! ### Start a Webhook Server
+//! ```rust,no_run
+//! use whatsapp_business_rs::{
+//!     client::Client,
+//!     server::{Server, Handler, EventContext, IncomingMessage},
+//!     Error
+//! };
+//!
+//! struct MyHandler;
+//!
+//! impl Handler for MyHandler {
+//!     async fn handle_message(&self, _ctx: EventContext, msg: IncomingMessage) {
+//!         println!("{:#?}", msg);
+//!         // If feature incoming_message_ext is enabled
+//!         # #[cfg(feature = "incoming_message_ext")]
+//!         # {
+//!         msg.reply("Thanks for your message!").await.unwrap();
+//!         # }
+//!     }
+//! }
+//!
+//! # async fn start_server_example() {
+//! let server = Server::builder()
+//!     .endpoint("127.0.0.1:8080".parse().unwrap())
+//!     .build();
+//!
+//! // If feature incoming_message_ext is enabled.
+//! // Client is needed for interacting with the API.
+//! # #[cfg(feature = "incoming_message_ext")]
+//! # {
+//! let client = Client::new("ACCESS_TOKEN").await.unwrap();    
+//! server.serve(MyHandler, client).await.unwrap();
+//! # }
+//! # #[cfg(not(feature = "incoming_message_ext"))]
+//! # {
+//! server.serve(MyHandler).await.unwrap();
+//! # }
+//! # }
+//! ```
+//!
+//! ---
+//!
+//! ### Configure a Webhook
+//! ```rust,no_run
+//! use whatsapp_business_rs::{
+//!     app::{SubscriptionField, WebhookConfig},
+//!     client::Client,
+//!     App,
+//! };
+//!
+//! # async fn configure_webhook_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let app = App::new("YOUR_APP_ID");
+//!
+//! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+//! client
+//!     .app(app)
+//!     .configure_webhook(("https://example.com/webhook", "very_secret"))
+//!     .events(
+//!         [
+//!             SubscriptionField::Messages,
+//!             SubscriptionField::MessageTemplateStatusUpdate,
+//!         ]
+//!         .into(),
+//!     )
+//!     .await?;
+//! # Ok(()) }
+//! ```
+//!
+//! ---
+//!
+//! ### Listing Catalogs
+//! ```rust,no_run
+//! use whatsapp_business_rs::{client::Client, Waba, waba::CatalogMetadataField};
+//! use futures::TryStreamExt as _;
+//!
+//! # async fn list_catalogs_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let business = Waba::new("YOUR_WABA_ID");
+//! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+//!
+//! let mut catalogs = client
+//!     .waba(business)
+//!     .list_catalogs()
+//!     .metadata([CatalogMetadataField::Name, CatalogMetadataField::Vertical].into())
+//!     .into_stream();
+//!
+//! while let Some(catalog) = catalogs.try_next().await? {
+//!     println!("{:?}", catalog);
+//! }
+//! # Ok(()) }
+//! ```
+//!
+//! ---
+//!
+//! ### Creating a Product
+//! ```rust,no_run
+//! use whatsapp_business_rs::catalog::ProductData;
+//! use whatsapp_business_rs::Client;
+//!
+//! # async fn create_product_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+//! let catalog_manager = client.catalog("YOUR_CATALOG_ID");
+//!
+//! let product = ProductData::default()
+//!     .name("Rust Programming Book")
+//!     .description("Learn Rust with this comprehensive guide")
+//!     .price(39.99)
+//!     .currency("USD")
+//!     .image_url("https://example.com/book.jpg")
+//!     .build("rust-book-001");
+//!
+//! let created = catalog_manager.create_product(product).await.unwrap();
+//! println!("Created product ID: {}", created.product.product_id());
+//! # Ok(()) }
+//! ```
+//!
+//! ---
+
+pub mod app;
+pub mod catalog;
+pub mod client;
+pub mod error;
+pub mod message;
+mod rest;
+pub mod server;
+pub mod waba;
+
+macro_rules! identity {
+    // Generate identity functions with documentation
+    ($($variant:ident)*) => {
+        paste::paste! {
+            impl IdentityRef {
+                $(
+                    #[doc = "Create a `" $variant "` identity"]
+                    pub fn [<$variant:snake>](id: impl Into<String>) -> Self {
+                        Self {
+                            phone_id: id.into(),
+                            identity_type: IdentityType::$variant,
+                        }
+                    }
+                )*
+            }
+
+            impl Identity {
+                $(
+                    #[doc = "Create a `" $variant "` identity"]
+                    pub fn [<$variant:snake>](id: impl Into<String>) -> Self {
+                        Self {
+                            phone_id: id.into(),
+                            identity_type: IdentityType::$variant,
+                            metadata: IdentityMetadata::default()
+                        }
+                    }
+                )*
+            }
+        }
+    }
+}
+
+/// A reference to a WhatsApp identity, used for addressing messages.
+///
+/// This struct represents either an individual user or a business account within
+/// the WhatsApp ecosystem. It's primarily used for specifying senders and recipients
+/// in message operations, acting as a lightweight identifier without full metadata.
+///
+/// You can construct an `IdentityRef` easily using the convenience helpers:
+/// - [`IdentityRef::user`] for individual users.
+/// - [`IdentityRef::business`] for WhatsApp Business Accounts (WBAs).
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[repr(C)]
+pub struct IdentityRef {
+    /// Identity type (user, business)
+    #[serde(rename(serialize = "recipient_type"), skip_deserializing)]
+    identity_type: IdentityType,
+
+    /// WhatsApp ID (e.g., phone number ID)
+    #[serde(rename(serialize = "to", deserialize = "from"))]
+    pub(crate) phone_id: String,
+}
+
+impl IdentityRef {
+    /// Returns a reference to the WhatsApp ID associated with this identity.
+    ///
+    /// This ID can be a phone number for a user or a phone number ID for a business.
+    ///
+    /// # Returns
+    /// A `&str` representing the `phone_id`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::IdentityRef;
+    ///
+    /// let user_id = IdentityRef::user("+1234567890");
+    /// assert_eq!(user_id.phone_id(), "+1234567890");
+    /// ```
+    pub fn phone_id(&self) -> &str {
+        &self.phone_id
+    }
+
+    /// Returns the type of this WhatsApp identity.
+    ///
+    /// This indicates whether the identity represents an individual `User` or a `Business` account.
+    ///
+    /// # Returns
+    /// An `IdentityType` enum value.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::{IdentityRef, IdentityType};
+    ///
+    /// let business_id = IdentityRef::business("1234567890");
+    /// assert_eq!(business_id.identity_type(), IdentityType::Business);
+    /// ```
+    pub fn identity_type(&self) -> IdentityType {
+        self.identity_type
+    }
+}
+
+/// Defines the type of participant in a WhatsApp conversation.
+///
+/// This enum is used to distinguish between an individual WhatsApp user
+/// and a WhatsApp Business Account (WBA).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum IdentityType {
+    /// Represents an **individual WhatsApp user**.
+    #[serde(rename(serialize = "individual"))]
+    User,
+
+    /// Represents a **WhatsApp Business**.
+    #[serde(rename(serialize = "business"))]
+    #[default]
+    Business,
+}
+
+identity! {
+    User
+    Business
+}
+
+/// Represents a **full WhatsApp identity** with additional metadata.
+///
+/// Unlike [`IdentityRef`] which is a lightweight reference for addressing,
+/// `Identity` includes richer details about the participant, such as
+/// their display name and phone number (as shown in the UI).
+///
+/// This struct is typically used for **received messages** where WhatsApp
+/// provides comprehensive details about the sender and recipient.
+///
+/// # Fields
+/// - `identity_type`: The type of participant (User or Business).
+/// - `phone_id`: The WhatsApp ID (phone number or phone number ID) of the participant.
+/// - `metadata`: Additional information about the identity, such as name and
+///   display phone number.
+#[derive(PartialEq, Eq, Clone, Debug)]
+#[repr(C)]
+pub struct Identity {
+    /// The type of this identity, indicating whether it's a `User` or `Business`.
+    pub identity_type: IdentityType,
+
+    /// The unique WhatsApp ID associated with this identity.
+    /// This is typically the phone number for users or the phone number ID for businesses.
+    pub phone_id: String,
+
+    /// Optional metadata associated with this identity, such as display name
+    /// or formatted phone number.
+    pub metadata: IdentityMetadata,
+}
+
+derive! {
+    /// Additional information associated with a WhatsApp [`Identity`].
+    ///
+    /// This struct holds optional, human-readable details about an identity,
+    /// supplementing the core `phone_id`.
+    #[derive(#Fields, PartialEq, Eq, Clone, Debug, Default)]
+    #[repr(C)] // already though
+    #[non_exhaustive]
+    pub struct IdentityMetadata {
+        /// An optional display name for the identity, as configured in WhatsApp.
+        /// This might be a contact's name or a business's registered name.
+        pub name: Option<String>,
+
+        /// An optional formatted phone number, as it might be displayed in the UI.
+        /// This can differ from `phone_id` if `phone_id` is a phone number ID
+        /// or if it's a raw E.164 number without formatting.
+        pub phone_number: Option<String>,
+    }
+}
+
+impl Identity {
+    /// Converts this full `Identity` into a lightweight `IdentityRef`.
+    ///
+    /// This method is useful when you have a complete `Identity` object
+    /// (e.g., from an incoming message) but only need the essential
+    /// addressing information (`identity_type` and `phone_id`) to
+    /// construct an outgoing message or interact with other API methods
+    /// that accept `IdentityRef`.
+    ///
+    /// # Returns
+    /// An `IdentityRef` containing the `phone_id` and `identity_type`
+    /// from this `Identity`.
+    pub fn as_ref(&self) -> IdentityRef {
+        IdentityRef {
+            phone_id: self.phone_id.clone(),
+            identity_type: self.identity_type,
+        }
+    }
+}
+
+derive! {
+    /// A Whatsapp Business Account (WABA).
+    ///
+    /// This struct represents the top-level WhatsApp Business Account, identified by its
+    /// `account_id`. It's essentially the container for all your WhatsApp Business assets,
+    /// including phone numbers, catalogs, and subscribed apps.
+    ///
+    /// You typically interact with a `Waba` through the `WabaManager` which provides
+    /// methods to manage the account's resources.
+    #[derive(#NodeImpl, PartialEq, Eq, Clone, Debug)]
+    pub struct Waba {
+        pub(crate) account_id: String,
+    }
+}
+
+/// Represents a specific WhatsApp Business profile, associating a WABA with a particular
+/// phone number's identity.
+///
+/// While `Waba` is the overarching business account, `Business` narrows that down to a
+/// specific operational identity, tied to a phone number. Think of `Waba` as your
+/// entire business entity on WhatsApp, and `Business` as one of its distinct storefronts
+/// or communication channels, specifically managed through a registered phone number.
+///
+/// This struct is useful for operations that need to be scoped to a particular
+/// phone number within a WABA.
+///
+/// # Fields
+/// - `waba`: The [`Waba`] (WhatsApp Business Account) this business identity belongs to.
+/// - `identity`: The [`IdentityRef`] of this specific business profile, which includes
+///   the phone number ID.
+///
+/// [`Waba`]: crate::Waba
+/// [`IdentityRef`]: crate::IdentityRef
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct Business {
+    pub waba: Waba,
+    pub identity: IdentityRef,
+}
+
+impl Business {
+    /// Creates a new `Business` instance.
+    ///
+    /// This constructor associates a [`Waba`] with a specific phone number identity,
+    /// effectively defining a distinct business presence within that WABA.
+    ///
+    /// # Parameters
+    /// - `account`: The [`Waba`] (WhatsApp Business Account) to which this business
+    ///   identity belongs. This can be a `Waba` struct or anything that converts into it.
+    /// - `phone_id`: The unique identifier for the phone number associated with this
+    ///   business identity. This is typically obtained after successfully registering
+    ///   and verifying a phone number.
+    ///
+    /// # Returns
+    /// A new `Business` instance.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use whatsapp_business_rs::{Waba, Business, IdentityRef};
+    ///
+    /// let my_waba = Waba::new("YOUR_WABA_ID");
+    /// let my_phone_id = "YOUR_REGISTERED_PHONE_NUMBER_ID";
+    ///
+    /// let my_business_profile = Business::new(my_waba, my_phone_id);
+    ///
+    /// println!(
+    ///     "Business profile for WABA: {} and Phone ID: {}",
+    ///     my_business_profile.waba.account_id(),
+    ///     my_business_profile.identity.phone_id()
+    /// );
+    /// ```
+    ///
+    /// [`Waba`]: crate::Waba
+    /// [`IdentityRef`]: crate::IdentityRef
+    pub fn new(account: impl Into<Waba>, phone_id: impl Into<String>) -> Self {
+        Self {
+            waba: account.into(),
+            identity: IdentityRef::business(phone_id),
+        }
+    }
+}
+
+impl Deref for Business {
+    type Target = Waba;
+
+    fn deref(&self) -> &Self::Target {
+        &self.waba
+    }
+}
+
+derive! {
+    /// A reference to a catalog
+    #[derive(#NodeImpl, PartialEq, Eq, Clone, Debug)]
+    #[repr(C)]
+    pub struct CatalogRef {
+        pub(crate) id: String,
+    }
+}
+
+derive! {
+    /// Represents a Meta App
+    #[derive(#NodeImpl, PartialEq, Eq, Clone, Debug)]
+    pub struct App {
+        pub(crate) id: String,
+    }
+}
+
+/// A fluent interface for selecting fields for Meta's Graph API.
+///
+/// This type is used internally by library methods like [`CatalogManager::list_products`] to let
+/// you customize the fields included in the response payload.
+///
+/// `Fields` builds a collection of desired fields.
+///
+/// # Example
+/// ```rust
+/// use whatsapp_business_rs::catalog::ProductDataField;
+/// use whatsapp_business_rs::Fields;
+///
+/// # async fn example(catalog: whatsapp_business_rs::catalog::CatalogManager<'_>) {
+/// catalog.list_products().metadata(
+///     Fields::new()
+///         .with(ProductDataField::Price)
+///         .with(ProductDataField::Availability),
+/// );
+/// # }
+/// ```
+///
+/// # Notes
+/// - The exact set of available fields depends on the context (e.g. products, subscriptions).
+/// - This struct is typically used as an argument to other builder methods (e.g., `.events()` for webhooks).
+///
+/// [`CatalogManager::list_products`]: crate::CatalogManager::list_products
+#[derive(Clone, Debug)]
+pub struct Fields<Field> {
+    pub(crate) fields: HashSet<Field>,
+}
+
+impl<F> Default for Fields<F> {
+    fn default() -> Self {
+        Self {
+            fields: HashSet::default(),
+        }
+    }
+}
+
+impl<Field> Fields<Field>
+where
+    Field: FieldsTrait,
+{
+    /// Creates a new `Fields` instance
+    pub fn new() -> Self {
+        Fields::default()
+    }
+
+    /// Adds a single field to the request.
+    ///
+    /// # Parameters
+    /// - `field`: The field to include in the request.
+    ///
+    /// # Returns
+    /// The updated `Fields` instance.
+    pub fn with(mut self, field: Field) -> Self {
+        self.fields.insert(field);
+        self
+    }
+
+    /// Includes all available fields for this type.
+    ///
+    /// This is a convenience method for when you want the full response without
+    /// specifying each field individually.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::Fields;
+    ///
+    /// # use whatsapp_business_rs::catalog::CatalogManager;
+    /// # async fn example(catalog: CatalogManager<'_>) {
+    /// catalog
+    ///     .list_products()
+    ///     .metadata(Fields::all())
+    ///     .into_stream();
+    /// # }
+    /// ```
+    #[inline]
+    pub fn all() -> Self {
+        let mut s = Self::new();
+        s.extend(Field::ALL);
+        s
+    }
+
+    pub(crate) fn into_request<const N: usize>(
+        self,
+        request: RequestBuilder,
+        mandatory: [&str; N],
+    ) -> RequestBuilder {
+        let fields_query = self
+            .fields
+            .iter()
+            .map(|f| f.as_snake_case())
+            .chain(mandatory)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        request.query(&[("fields", fields_query)])
+    }
+}
+
+impl<Field> FromIterator<Field> for Fields<Field>
+where
+    Field: FieldsTrait,
+{
+    #[inline]
+    fn from_iter<T: IntoIterator<Item = Field>>(iter: T) -> Self {
+        let fields = HashSet::from_iter(iter);
+        Self { fields }
+    }
+}
+
+impl<Field, const N: usize> From<[Field; N]> for Fields<Field>
+where
+    Field: FieldsTrait,
+{
+    fn from(arr: [Field; N]) -> Self {
+        Self::from_iter(arr)
+    }
+}
+
+impl<Field> Extend<Field> for Fields<Field>
+where
+    Field: FieldsTrait,
+{
+    #[inline]
+    fn extend<T: IntoIterator<Item = Field>>(&mut self, iter: T) {
+        self.fields.extend(iter)
+    }
+}
+
+impl<'a, Field> Extend<&'a Field> for Fields<Field>
+where
+    Field: FieldsTrait + 'a,
+{
+    #[inline]
+    fn extend<T: IntoIterator<Item = &'a Field>>(&mut self, iter: T) {
+        self.fields.extend(iter)
+    }
+}
+
+/// A composable update request builder for Graph-style resources.
+///
+/// This struct allows you to fluently configure fields for an update operation
+/// (such as updating a product), then execute the request by `.await`ing the
+/// builder.
+///
+/// You typically don’t construct this manually. Instead, it’s returned by
+/// helper methods like [`CatalogManager::update_product()`] or
+/// [`CatalogManager::update_product_by_id()`].
+///
+/// # Usage
+///
+/// ```rust,no_run
+/// # use whatsapp_business_rs::catalog::{CatalogManager, ProductRef};
+/// # async fn example_update_builder(catalog: CatalogManager<'_>, product_ref: ProductRef)
+/// # -> Result<(), Box<dyn std::error::Error>> {
+/// let updated_product_info = catalog.update_product(product_ref)
+///      .name("Updated Product Name")
+///      .price(4999)
+///      .currency("USD")
+///      .await?; // Await to send the update
+/// # Ok(())}
+/// ```
+///
+/// # Type Parameters
+/// - `T`: The type holding the fields being updated (e.g., `ProductData`).
+/// - `U`: The type returned as a response from the API after a successful update.
+///
+/// # Notes
+/// - Only the fields you explicitly set will be sent in the request body.
+/// - The update is not performed until the builder is `.await`ed.
+///
+/// [`CatalogManager::update_product()`]: crate::catalog::CatalogManager::update_product
+/// [`CatalogManager::update_product_by_id()`]: crate::catalog::CatalogManager::update_product_by_id
+#[must_use = "Update does nothing unless you `.await` or `.execute().await` it"]
+pub struct Update<'a, T, U = ()> {
+    request: Box<RequestBuilder>,
+    pub(crate) item: T,
+    response: PhantomData<U>,
+    _marker: PhantomData<&'a ()>,
+}
+
+impl<T, U> Update<'_, T, U>
+where
+    T: Default,
+{
+    /// Creates a new update builder.
+    ///
+    /// # Parameters
+    /// - `request`: The request builder to use.
+    ///
+    /// # Returns
+    /// An `Update<T, U>` instance.
+    pub(crate) fn new(request: RequestBuilder) -> Self {
+        Self {
+            request: request.into(),
+            item: T::default(),
+            response: PhantomData,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T, U> Update<'_, T, U> {
+    /// Specifies the authentication token to use for this update request.
+    ///
+    /// This is particularly useful for applications managing multiple entities (e.g., catalogs, products)
+    /// where different API tokens might be required for various update operations.
+    /// It allows you to reuse a manager instance (e.g., `CatalogManager`) and apply the
+    /// appropriate token for each specific update without re-initializing the `Client`.
+    ///
+    /// If not called, the request will use the authentication configured with the `Client`
+    /// that initiated this update.
+    ///
+    /// # Parameters
+    /// - `auth`: [`Auth`] token to use for this specific request.
+    ///
+    /// [`Auth`]: crate::client::Auth
+    pub fn with_auth<'a>(mut self, auth: impl ToValue<'a, Auth>) -> Self {
+        *self.request = self.request.bearer_auth(auth.to_value());
+        self
+    }
+}
+
+IntoFuture! {
+    impl<'a, T, U> Update<'a, T, U>
+    [
+    where
+        T: Serialize + Send + 'static,
+        U: FromResponse + 'static,
+    ]
+    {
+        /// Sends the update request with the configured fields.
+        ///
+        /// This method serializes the inner update object and performs the actual
+        /// HTTP request. It returns the deserialized response of type `U`.
+        /// Because `Update` implements `IntoFuture`, you can also simply `.await`
+        /// the `Update` instance directly, which will call this method internally.
+        ///
+        /// # Returns
+        /// A `Result` containing either the deserialized response of type `U`, or an [`Error`].
+        ///
+        /// # Example
+        /// ```rust,no_run
+        /// # use whatsapp_business_rs::catalog::{CatalogManager, ProductRef};
+        /// # use whatsapp_business_rs::client::Auth;
+        /// # async fn example_execute_update(catalog: CatalogManager<'_>,
+        /// # product_ref: ProductRef) -> Result<(), Box<dyn std::error::Error>> {
+        /// // Preferred: Await directly
+        /// catalog.update_product(&product_ref)
+        ///      .name("New Name")
+        ///      .availability("in stock")
+        ///      .with_auth("auth_token") // Use with_auth if a specific token is needed
+        ///      .await?;
+        ///
+        /// // Alternative: Call .execute().await
+        /// catalog.update_product(&product_ref)
+        ///      .name("Another Name")
+        ///      .execute()
+        ///      .await?;
+        /// # Ok(())}
+        /// ```
+        /// [`Error`]: crate::error::Error
+        pub async fn execute(self) -> Result<U, Error> {
+            let request = self.request.json(&self.item);
+            fut_net_op(request).await
+        }
+    }
+}
+
+/// A type indicating that an optional flow's step had been skipped.
+///
+/// See [`OnboardingFlow::share_credit_line`].
+///
+/// [`OnboardingFlow::share_credit_line`]: crate::app::OnboardingFlow::share_credit_line
+pub struct FlowStepSkipped;
+
+/// Represents an **error object returned directly by Meta's Graph API** in its responses
+/// or webhook payload.
+///
+/// This struct captures detailed information about an error encountered during an API call
+/// to Meta's platform or webhook analysis. It is distinct from the crate's own `Error` enum,
+/// as `MetaError` specifically describes issues reported by the Meta API itself.
+///
+/// # Fields
+/// - `code`: A numerical error code provided by Meta, indicating the type of error.
+/// - `title`: An optional, concise title or summary of the error.
+/// - `message`: An optional, more descriptive message explaining the error.
+/// - `support`: An optional URL pointing to Meta's documentation or support
+///   pages related to the error.
+/// - `error_metadata`: Additional metadata about the error, often used for specific
+///   error categories or context.
+///
+/// # Example (from Meta API response)
+/// ```json
+/// {
+///   "error": {
+///     "message": "(#100) Parameter missing",
+///     "type": "OAuthException",
+///     "code": 100,
+///     "fbtrace_id": "A4K...",
+///     "error_data": {
+///       "messaging_product": "whatsapp",
+///       "details": "The recipient phone number is not valid."
+///     }
+///   }
+/// }
+/// ```
+#[derive(Serialize, Deserialize, PartialEq, Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct MetaError {
+    // TODO: Add detail
+    pub code: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fbtrace_id: Option<String>,
+    #[serde(rename = "href", default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<String>,
+    #[serde(
+        rename = "error_data",
+        default,
+        skip_serializing_if = "MetaErrorMetadata::is_none"
+    )]
+    pub error_metadata: MetaErrorMetadata,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct MetaErrorMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+impl MetaErrorMetadata {
+    fn is_none(&self) -> bool {
+        self.details.is_none()
+    }
+}
+
+/// Represents a timestamp returned by the WhatsApp Business API.
+///
+/// Meta typically uses UNIX timestamps (`seconds since epoch`) across most
+/// of the Graph API. However, this is not guaranteed to remain consistent in the future.
+///
+/// # Note
+/// - Currently, all observed timestamps are UNIX-based.
+/// - This may change without warning.
+/// - Always assume the value is a raw `i64` unless explicitly documented otherwise.
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub struct Timestamp {
+    pub(crate) inner: i64,
+}
+
+impl Timestamp {
+    /// Returns the raw timestamp in seconds.
+    ///
+    /// This is usually a UNIX timestamp (seconds since epoch),
+    /// but could be relative in rare cases (e.g., token TTL).
+    pub fn seconds(&self) -> i64 {
+        self.inner
+    }
+}
+
+/// Trait used for identity/value conversion with Cow optimization
+pub(crate) trait ToValue<'a, Value>: Send + Sync
+where
+    Value: Clone + Send + Sync,
+{
+    fn to_value(self) -> Cow<'a, Value>;
+}
+
+impl<'a, Value, T> ToValue<'a, Value> for T
+where
+    Value: From<String> + Clone + Send + Sync + 'a,
+    T: Into<String> + Send + Sync,
+{
+    #[inline]
+    fn to_value(self) -> Cow<'a, Value> {
+        Cow::Owned(Value::from(self.into()))
+    }
+}
+
+impl From<String> for IdentityRef {
+    /// Implements conversion from a `String` into an `IdentityRef`.
+    ///
+    /// This allows for convenient creation of `IdentityRef` instances directly
+    /// from string representations of WhatsApp IDs. The conversion logic attempts
+    /// to infer the `IdentityType` based on whether the string starts with a "+":
+    ///
+    /// - If the `value` starts with `+` (indicating an E.164 formatted phone number),
+    ///   it's treated as an [`IdentityRef::user`].
+    /// - Otherwise (e.g., a numerical ID), it's treated as an `IdentityRef::business`.
+    ///
+    /// # Arguments
+    /// - `value`: The `String` representing the WhatsApp ID (phone number or phone number ID).
+    ///
+    /// # Returns
+    /// An `IdentityRef` with the inferred `identity_type` and the provided `phone_id`.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use whatsapp_business_rs::{IdentityRef, IdentityType};
+    ///
+    /// let user_ref: IdentityRef = "+1234567890".to_string().into();
+    /// assert_eq!(user_ref.phone_id(), "+1234567890");
+    /// assert_eq!(user_ref.identity_type(), IdentityType::User);
+    ///
+    /// let business_ref: IdentityRef = "123456789012345".to_string().into();
+    /// assert_eq!(business_ref.phone_id(), "123456789012345");
+    /// assert_eq!(business_ref.identity_type(), IdentityType::Business);
+    /// ```
+    fn from(value: String) -> Self {
+        if value.starts_with("+") {
+            IdentityRef::user(value)
+        } else {
+            IdentityRef::business(value)
+        }
+    }
+}
+
+to_value! {
+    IdentityRef Business
+}
+
+impl fmt::Display for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.identity_type {
+            IdentityType::User => write!(f, "👤 {}", self.phone_id),
+            IdentityType::Business => write!(f, "🏢 {}", self.phone_id),
+        }
+    }
+}
+
+impl ToValue<'_, IdentityRef> for Identity {
+    #[inline]
+    fn to_value(self) -> Cow<'static, IdentityRef> {
+        Cow::Owned(IdentityRef {
+            phone_id: self.phone_id,
+            identity_type: self.identity_type,
+        })
+    }
+}
+
+impl<'a> ToValue<'a, IdentityRef> for &'a Identity {
+    #[inline]
+    fn to_value(self) -> Cow<'a, IdentityRef> {
+        // SAFETY:
+        // - `Identity` is #[repr(C)] so fields are laid out in declared order
+        // - `IdentityRef` is #[repr(C)] and only includes a prefix of `Identity` fields.
+        // - So it's safe to transmute a `&Identity` into a `&IdentityRef`.
+        let view = unsafe { view_ref(self) };
+        Cow::Borrowed(view)
+    }
+}
+
+impl ToValue<'_, Waba> for Business {
+    #[inline]
+    fn to_value(self) -> Cow<'static, Waba> {
+        Cow::Owned(self.waba)
+    }
+}
+
+impl<'a> ToValue<'a, Waba> for &'a Business {
+    #[inline]
+    fn to_value(self) -> Cow<'a, Waba> {
+        Cow::Borrowed(&self.waba)
+    }
+}
+
+pub use client::{Auth, Client};
+pub use error::Error;
+pub use message::{Draft, Message};
+pub use server::{Handler as WebhookHandler, Server};
+
+use reqwest::RequestBuilder;
+use rest::{fut_net_op, macros::view_ref, FieldsTrait, FromResponse};
+use serde::{Deserialize, Serialize};
+use std::{borrow::Cow, collections::HashSet, fmt, marker::PhantomData, ops::Deref};
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    // CD test
+    #[test]
+    fn ub() {
+        let identity = Identity::user("+1399444994");
+        let view: &IdentityRef = unsafe { view_ref(&identity) };
+
+        assert_eq!(view.identity_type, IdentityType::User);
+        assert_eq!(view.phone_id, "+1399444994");
+
+        let view_clone = view.clone();
+
+        assert_eq!(view_clone, *view);
+    }
+}
