@@ -11,6 +11,7 @@ readme = "README.md"
 keywords = ["whatsapp", "rust", "sdk", "messaging", "async"]
 categories = ["api-bindings", "web-programming::http-client", "network-programming", "asynchronous"]
 homepage = "https://github.com/veecore/whatsapp-business-rs"
+build = "build.rs"
 
 [dependencies]
 reqwest = { version = "0.11", features = ["json", "multipart"] }
@@ -31,4 +32,3 @@ base64 = "0.22.1"
 
 [features]
 incoming_message_ext = []
-nightly = []
