@@ -497,7 +497,7 @@ derive! {
 /// - The exact set of available fields depends on the context (e.g. products, subscriptions).
 /// - This struct is typically used as an argument to other builder methods (e.g., `.events()` for webhooks).
 ///
-/// [`CatalogManager::list_products`]: crate::CatalogManager::list_products
+/// [`CatalogManager::list_products`]: crate::catalog::CatalogManager::list_products
 #[derive(Clone, Debug)]
 pub struct Fields<Field> {
     pub(crate) fields: HashSet<Field>,

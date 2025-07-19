@@ -315,7 +315,7 @@ impl<'i> AppManager<'i> {
     /// # }
     /// ```
     ///
-    /// [`AppSecret`]: crate::AppSecret
+    /// [`AppSecret`]: crate::client::AppSecret
     /// [`Error`]: crate::error::Error
     pub async fn get_access_token<'s>(
         &self,
@@ -646,7 +646,6 @@ impl<'a> ConfigureWebhook<'a> {
     /// ```
     ///
     /// [`Fields`]: crate::Fields
-    /// [`SubscriptionField`]: crate::webhook::SubscriptionField
     pub fn events(mut self, events: Fields<SubscriptionField>) -> Self {
         self.request = events.into_request(self.request, []);
         self

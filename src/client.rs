@@ -751,7 +751,6 @@ impl<'i> MessageManager<'i> {
     /// println!("Media uploaded with ID: {}", media_id);
     /// # Ok(())}
     /// ```
-    /// [`UploadMedia`]: crate::message::UploadMedia
     #[inline]
     pub fn upload_media(
         &self,
@@ -785,7 +784,6 @@ impl<'i> MessageManager<'i> {
     /// println!("Media ID {} deleted.", uploaded_media_id);
     /// # Ok(())}
     /// ```
-    /// [`DeleteMedia`]: crate::message::DeleteMedia
     #[inline]
     pub fn delete_media(&self, media_id: &str) -> DeleteMedia {
         DeleteMedia {

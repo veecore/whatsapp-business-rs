@@ -153,8 +153,7 @@ impl<'i> WabaManager<'i> {
     /// # Ok(())}
     /// ```
     ///
-    /// [`Catalog`]: crate::Catalog
-    /// [`ListCatalog`]: crate::waba::ListCatalog
+    /// [`Catalog`]: crate::waba::Catalog
     pub fn list_catalogs(&self) -> ListCatalog {
         let url = self.endpoint("product_catalogs");
         let request = self.client.get(url);
@@ -186,9 +185,6 @@ impl<'i> WabaManager<'i> {
     ///      .await?;
     /// # Ok(())}
     /// ```
-    ///
-    /// [`PhoneNumber`]: crate::PhoneNumber
-    /// [`ListNumber`]: crate::waba::ListNumber
     pub fn list_phone_numbers(&self) -> ListNumber {
         let url = self.endpoint("phone_numbers");
         let request = self.client.get(url);
@@ -221,9 +217,6 @@ impl<'i> WabaManager<'i> {
     ///      .await?;
     /// # Ok(())}
     /// ```
-    ///
-    /// [`AppInfo`]: crate::AppInfo
-    /// [`ListApp`]: crate::waba::ListApp
     pub fn list_subcribed_apps(&self) -> ListApp {
         let url = self.endpoint("subscribed_apps");
         let request = self.client.get(url);
