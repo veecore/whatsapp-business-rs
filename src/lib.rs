@@ -214,7 +214,7 @@
 //! ```rust,no_run
 //! use whatsapp_business_rs::{
 //!     client::Client,
-//!     server::{Server, WebhookHandler, EventContext, IncomingMessage},
+//!     server::{Server, Handler, EventContext, IncomingMessage},
 //!     app::SubscriptionField,
 //!     Auth,
 //! };
@@ -232,7 +232,7 @@
 //!     }
 //! }
 //!
-//! impl WebhookHandler for EchoServerHandler {
+//! impl Handler for EchoServerHandler {
 //!     // This method handles incoming messages
 //!     async fn handle_message(
 //!         &self,

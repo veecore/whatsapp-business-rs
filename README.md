@@ -66,24 +66,24 @@ use whatsapp_business_rs::Client;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let client = Client::new("YOUR_ACCESS_TOKEN").await?; // Initialize your client
-	let business_phone_id = "YOUR_BUSINESS_NUMBER_ID"; // Replace with your WhatsApp Phone Number ID
-	let recipient_number = "+16012345678"; // Replace with recipient's phone number
+    let client = Client::new("YOUR_ACCESS_TOKEN").await?; // Initialize your client
+    let business_phone_id = "YOUR_BUSINESS_NUMBER_ID"; // Replace with your WhatsApp Phone Number ID
+    let recipient_number = "+16012345678"; // Replace with recipient's phone number
 
-	// Send a simple text message
-	client.message(business_phone_id)
-		.send(recipient_number, "Hello from Rust! How can I help you today?")
-		.await?;
-	println!("Text message sent!");
+    // Send a simple text message
+    client.message(business_phone_id)
+        .send(recipient_number, "Hello from Rust! How can I help you today?")
+        .await?;
+    println!("Text message sent!");
 
-	// For multi-tenant applications, you can specify an alternate token for a specific message:
-	client.message(business_phone_id)
-		.send(recipient_number, "This message uses a different token!")
-		.with_auth("ANOTHER_BUSINESS_ACCESS_TOKEN")
-		.await?;
-	println!("Text message sent with an alternate token!");
+    // For multi-tenant applications, you can specify an alternate token for a specific message:
+    client.message(business_phone_id)
+        .send(recipient_number, "This message uses a different token!")
+        .with_auth("ANOTHER_BUSINESS_ACCESS_TOKEN")
+        .await?;
+    println!("Text message sent with an alternate token!");
 
-	Ok(())
+    Ok(())
 }
 ```
 
@@ -97,13 +97,13 @@ use whatsapp_business_rs::client::Client;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let client = Client::builder()
-		.timeout(Duration::from_secs(15))
-		.api_version("v19.0")
-		.connect("YOUR_ACCESS_TOKEN")
-		.await?;
-	println!("Client created with custom timeout and API version!");
-	Ok(())
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .api_version("v19.0")
+        .connect("YOUR_ACCESS_TOKEN")
+        .await?;
+    println!("Client created with custom timeout and API version!");
+    Ok(())
 }
 ```
 
@@ -115,20 +115,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use whatsapp_business_rs::{Client, Media};
 
 async fn send_video_example() -> Result<(), Box<dyn std::error::Error>> {
-	let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+    let client = Client::new("YOUR_ACCESS_TOKEN").await?;
 
-	let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
-	let recipient_phone_number = "+16012345678";
+    let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
+    let recipient_phone_number = "+16012345678";
 
-	// Example: Send a video from a file path
-	// Make sure to replace "path/to/your/video.mp4" with an actual path
-	let video = Media::from_path("path/to/your/video.mp4")
-		.await?
-		.caption("Check out this cool video!");
+    // Example: Send a video from a file path
+    // Make sure to replace "path/to/your/video.mp4" with an actual path
+    let video = Media::from_path("path/to/your/video.mp4")
+        .await?
+        .caption("Check out this cool video!");
 
-	client.message(sender_phone_id).send(recipient_phone_number, video).await?;
-	println!("Video message sent!");
-	Ok(())
+    client.message(sender_phone_id).send(recipient_phone_number, video).await?;
+    println!("Video message sent!");
+    Ok(())
 }
 ```
 
@@ -140,19 +140,19 @@ async fn send_video_example() -> Result<(), Box<dyn std::error::Error>> {
 use whatsapp_business_rs::{Client, Location};
 
 async fn send_location_example() -> Result<(), Box<dyn std::error::Error>> {
-	let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+    let client = Client::new("YOUR_ACCESS_TOKEN").await?;
 
-	let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
-	let recipient_phone_number = "+16012345678";
+    let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
+    let recipient_phone_number = "+16012345678";
 
-	// Send a location message with name and address
-	let location = Location::new(37.44216251868683, -122.16153582049394)
-		.name("Philz Coffee")
-		.address("101 Forest Ave, Palo Alto, CA 94301");
+    // Send a location message with name and address
+    let location = Location::new(37.44216251868683, -122.16153582049394)
+        .name("Philz Coffee")
+        .address("101 Forest Ave, Palo Alto, CA 94301");
 
-	client.message(sender_phone_id).send(recipient_phone_number, location).await?;
-	println!("Location message sent!");
-	Ok(())
+    client.message(sender_phone_id).send(recipient_phone_number, location).await?;
+    println!("Location message sent!");
+    Ok(())
 }
 ```
 
@@ -165,23 +165,23 @@ use whatsapp_business_rs::message::{InteractiveMessage, UrlButton};
 use whatsapp_business_rs::Client;
 
 async fn send_cta_example() -> Result<(), Box<dyn std::error::Error>> {
-	let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+    let client = Client::new("YOUR_ACCESS_TOKEN").await?;
 
-	let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
-	let recipient_phone_number = "+16012345678";
+    let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
+    let recipient_phone_number = "+16012345678";
 
-	// Create a URL button
-	let button = UrlButton::new("https://example.com/purchase", "2 for price of 1");
+    // Create a URL button
+    let button = UrlButton::new("https://example.com/purchase", "2 for price of 1");
 
-	// Create an interactive message with the button and a body text
-	let interactive_message = InteractiveMessage::new(
-		button,
-		"One-time offer for this shiny product. Hurry-up!"
-	);
+    // Create an interactive message with the button and a body text
+    let interactive_message = InteractiveMessage::new(
+        button,
+        "One-time offer for this shiny product. Hurry-up!"
+    );
 
-	client.message(sender_phone_id).send(recipient_phone_number, interactive_message).await?;
-	println!("Call-to-Action message sent!");
-	Ok(())
+    client.message(sender_phone_id).send(recipient_phone_number, interactive_message).await?;
+    println!("Call-to-Action message sent!");
+    Ok(())
 }
 ```
 
@@ -194,32 +194,32 @@ use whatsapp_business_rs::message::{InteractiveMessage, OptionList, OptionButton
 use whatsapp_business_rs::Client;
 
 async fn send_option_list_example() -> Result<(), Box<dyn std::error::Error>> {
-	let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+    let client = Client::new("YOUR_ACCESS_TOKEN").await?;
 
-	let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
-	let recipient_phone_number = "+16012345678";
+    let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
+    let recipient_phone_number = "+16012345678";
 
-	// Create sections with options
-	let section = Section::new(
-		"Choose an option regarding your last order",
-		[
-			OptionButton::new("Cancels deliver", "Cancel", "cancel-delivery"),
-			OptionButton::new("Proceed with order", "Order", "proceed-with-order"),
-		],
-	);
+    // Create sections with options
+    let section = Section::new(
+        "Choose an option regarding your last order",
+        [
+            OptionButton::new("Cancels deliver", "Cancel", "cancel-delivery"),
+            OptionButton::new("Proceed with order", "Order", "proceed-with-order"),
+        ],
+    );
 
-	// Create an option list with the section and a global label
-	let options = OptionList::new_section(section, "Delivery Options");
+    // Create an option list with the section and a global label
+    let options = OptionList::new_section(section, "Delivery Options");
 
-	// Create an interactive message with the option list, body, and footer
-	let interactive_message = InteractiveMessage::new(
-		options,
-		"Sorry your delivery is delayed... would you like to cancel the order?",
-	).footer("Only 70% in refund");
+    // Create an interactive message with the option list, body, and footer
+    let interactive_message = InteractiveMessage::new(
+        options,
+        "Sorry your delivery is delayed... would you like to cancel the order?",
+    ).footer("Only 70% in refund");
 
-	client.message(sender_phone_id).send(recipient_phone_number, interactive_message).await?;
-	println!("Option list message sent!");
-	Ok(())
+    client.message(sender_phone_id).send(recipient_phone_number, interactive_message).await?;
+    println!("Option list message sent!");
+    Ok(())
 }
 ```
 
@@ -239,7 +239,7 @@ use std::error::Error;
 // Define a handler struct for incoming webhook events
 #[derive(Debug)]
 struct EchoServerHandler {
-	// Store a client to send replies or just enable incoming_message_ext feature for ease
+    // Store a client to send replies or just enable incoming_message_ext feature for ease
     client: Client,
 }
 
@@ -311,24 +311,24 @@ use futures::TryStreamExt as _;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let client = Client::new("YOUR_ACCESS_TOKEN").await?;
-	let business = Waba::new("YOUR_WABA_ID");
+    let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+    let business = Waba::new("YOUR_WABA_ID");
 
-	let mut catalogs = client
-		.waba(business)
-		.list_catalogs()
-		.metadata([
-			CatalogMetadataField::Name,
-			CatalogMetadataField::Vertical
-		].into())
-		.into_stream();
+    let mut catalogs = client
+        .waba(business)
+        .list_catalogs()
+        .metadata([
+            CatalogMetadataField::Name,
+            CatalogMetadataField::Vertical
+        ].into())
+        .into_stream();
 
-	println!("Listing catalogs:");
-	while let Some(catalog) = catalogs.try_next().await? {
-		println!("{:?}", catalog);
-	}
+    println!("Listing catalogs:");
+    while let Some(catalog) = catalogs.try_next().await? {
+        println!("{:?}", catalog);
+    }
 
-	Ok(())
+    Ok(())
 }
 ```
 
@@ -342,20 +342,20 @@ use whatsapp_business_rs::Client;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let client = Client::new("YOUR_ACCESS_TOKEN").await?;
-	let product = ProductData::default()
-		.name("Rust Programming Book")
-		.description("Learn Rust with this comprehensive guide")
-		.price(39.99)
-		.currency("USD")
-		.image_url("https://example.com/book.jpg")
-		.build("rust-book-001");
+    let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+    let product = ProductData::default()
+        .name("Rust Programming Book")
+        .description("Learn Rust with this comprehensive guide")
+        .price(39.99)
+        .currency("USD")
+        .image_url("https://example.com/book.jpg")
+        .build("rust-book-001");
 
-	let result = client.catalog("YOUR_CATALOG_ID")
-		.create_product(product)
-		.await?;
-	println!("Product created with ID: {}", result.product.product_id());
-	Ok(())
+    let result = client.catalog("YOUR_CATALOG_ID")
+        .create_product(product)
+        .await?;
+    println!("Product created with ID: {}", result.product.product_id());
+    Ok(())
 }
 ```
 
