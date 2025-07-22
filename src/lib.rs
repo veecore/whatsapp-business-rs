@@ -13,15 +13,15 @@
 //! ## ✨ Features
 //!
 //! - **Message Management**: Construct, send, and receive various message types, including text, media,
-//!     interactive messages (buttons, lists), and reactions.
+//!   interactive messages (buttons, lists), and reactions.
 //! - **Client API**: A fluent builder for authenticating and managing interactions with the WhatsApp Business API.
 //! - **Webhook Server**: Easily set up a webhook server to receive and process incoming messages and
-//!     message status updates with signature validation.
+//!   message status updates with signature validation.
 //! - **App Management**: Configure webhook subscriptions and manage onboarding flows for connecting businesses to your app.
 //! - **WABA Management**: Administer your WhatsApp Business Account, including listing catalogs,
-//!     managing phone numbers, and running guided phone number registration flows.
+//!   managing phone numbers, and running guided phone number registration flows.
 //! - **Catalog Management**: Programmatically manage your product catalogs, allowing you to list,
-//!     create, and update products.
+//!   create, and update products.
 //!
 //! ## 🚀 Examples
 //!
