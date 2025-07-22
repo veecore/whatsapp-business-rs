@@ -271,6 +271,7 @@
 //! let handler = EchoServerHandler::new(client);
 //!
 //! // Build and start the webhook server
+//! # #[cfg(not(feature = "incoming_message_ext"))]
 //! Server::builder()
 //!     .endpoint("127.0.0.1:8080".parse().unwrap()) // The local address where your server will listen
 //!     .verify_payload("YOUR_APP_SECRET") // Use your app secret for payload verification
