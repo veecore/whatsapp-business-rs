@@ -947,10 +947,14 @@ pub struct PartnerAdded {
 #[derive(Clone)]
 pub struct IncomingMessage {
     /// The received message
+    #[cfg(not(feature = "incoming_message_ext"))]
+    pub message: Message,
+
+    #[cfg(feature = "incoming_message_ext")]
     pub(crate) message: Message,
 
     /// When the message was received (usually unix timestamp in seconds)
-    pub(crate) timestamp: Option<Timestamp>,
+    pub timestamp: Option<Timestamp>,
 
     #[cfg(feature = "incoming_message_ext")]
     /// Internal client for sending replies

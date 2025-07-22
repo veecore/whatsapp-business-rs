@@ -374,8 +374,6 @@ impl Media {
     /// * `media_source` - The source of the media content (bytes, URL, or WhatsApp ID).
     ///   Accepts anything convertible into a [`MediaSource`] enum variant.
     /// * `media_type` - The specific MIME type of the media (e.g., `image/jpeg`).
-    /// * `caption` - An optional caption for the media. Not applicable for audio or stickers.
-    /// * `filename` - An optional suggested filename for the recipient. Only applicable for documents.
     ///
     /// # Returns
     ///
@@ -400,6 +398,100 @@ impl Media {
             caption: None,
             filename: None,
         }
+    }
+
+    /// Creates a new `Media` instance specifically for a PDF document.
+    ///
+    /// This is a convenience constructor that sets the `media_type` to `application/pdf` automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `media_source` - The source of the PDF document (bytes, URL, or WhatsApp ID).
+    ///   Accepts anything convertible into a [`MediaSource`] enum variant.
+    /// * `filename` - The desired filename for the document.
+    ///
+    /// # Returns
+    ///
+    /// A new `Media` instance configured for a PDF document.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::message::Media;
+    ///
+    /// let pdf_document = Media::pdf("https://example.com/report.pdf", "MyReport.pdf");
+    /// ```
+    pub fn pdf(media_source: impl Into<MediaSource>, filename: impl Into<String>) -> Self {
+        Self::new(media_source, MediaType::Document(DocumentExtension::Pdf)).filename(filename)
+    }
+
+    /// Creates a new `Media` instance specifically for a JPEG image.
+    ///
+    /// This is a convenience constructor that sets the `media_type` to `image/jpeg` automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `media_source` - The source of the JPEG image (bytes, URL, or WhatsApp ID).
+    ///   Accepts anything convertible into a [`MediaSource`] enum variant.
+    ///
+    /// # Returns
+    ///
+    /// A new `Media` instance configured for a JPEG image.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::message::Media;
+    ///
+    /// let jpeg_image = Media::jpeg("11133444488849");
+    /// ```
+    pub fn jpeg(media_source: impl Into<MediaSource>) -> Self {
+        Self::new(media_source, MediaType::Image(ImageExtension::Jpeg))
+    }
+
+    /// Creates a new `Media` instance specifically for a WebP sticker.
+    ///
+    /// This is a convenience constructor that sets the `media_type` to `image/webp` automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `media_source` - The source of the WebP sticker (bytes, URL, or WhatsApp ID).
+    ///   Accepts anything convertible into a [`MediaSource`] enum variant.
+    ///
+    /// # Returns
+    ///
+    /// A new `Media` instance configured for a WebP sticker.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::message::Media;
+    ///
+    /// let webp_sticker = Media::sticker("https://example.com/sticker.webp");
+    /// ```
+    pub fn sticker(media_source: impl Into<MediaSource>) -> Self {
+        Self::new(media_source, MediaType::Sticker(StickerExtension::Webp))
+    }
+
+    /// Creates a new `Media` instance specifically for an MP4 video.
+    ///
+    /// This is a convenience constructor that sets the `media_type` to `video/mp4` automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `media_source` - The source of the MP4 video (bytes, URL, or WhatsApp ID).
+    ///   Accepts anything convertible into a [`MediaSource`] enum variant.
+    ///
+    /// # Returns
+    ///
+    /// A new `Media` instance configured for an MP4 video.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::message::Media;
+    /// # let image_bytes = [u8;1024];
+    ///
+    /// let mp4_video = Media::mp4(image_bytes);
+    /// ```
+    pub fn mp4(media_source: impl Into<MediaSource>) -> Self {
+        Self::new(media_source, MediaType::Video(VideoExtension::Mp4))
     }
 
     pub fn is_audio(&self) -> bool {
@@ -729,13 +821,51 @@ pub enum MediaSource {
     Id(String),
 }
 
-impl<T: Into<String>> From<T> for MediaSource {
-    fn from(value: T) -> Self {
-        let value = value.into();
-        if value.parse::<reqwest::Url>().is_ok() {
-            MediaSource::Link(value)
+impl MediaSource {
+    #[inline]
+    pub fn bytes(bytes: Vec<u8>) -> Self {
+        Self::Bytes(bytes)
+    }
+
+    #[inline]
+    pub fn link(link: impl Into<String>) -> Self {
+        Self::Link(link.into())
+    }
+
+    #[inline]
+    pub fn id(id: impl Into<String>) -> Self {
+        Self::Id(id.into())
+    }
+}
+
+impl From<Vec<u8>> for MediaSource {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Bytes(value)
+    }
+}
+
+impl From<&str> for MediaSource {
+    fn from(value: &str) -> Self {
+        // We used to fully parse as url::Url here but
+        // now we make it cheaper since the ids are currently
+        // numerical
+        if value.contains('.') {
+            MediaSource::link(value)
         } else {
-            MediaSource::Id(value)
+            MediaSource::id(value)
+        }
+    }
+}
+
+impl From<String> for MediaSource {
+    fn from(value: String) -> Self {
+        // We used to fully parse as url::Url here but
+        // now we make it cheaper since the ids are currently
+        // numerical
+        if value.contains('.') {
+            MediaSource::link(value)
+        } else {
+            MediaSource::id(value)
         }
     }
 }

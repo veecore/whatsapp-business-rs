@@ -1101,7 +1101,7 @@ impl Client {
         self.endpoint().join(node)
     }
 
-    // TODO: Since we don't benefit from going to String, we can just reuse this enpoint
+    // TODO: Since we don't benefit from going to String, we can just reuse this endpoint
     // in our error message instead of stealing like cavemen
     //
     // TOD: Use raw Endpoint

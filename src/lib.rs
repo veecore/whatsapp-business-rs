@@ -13,34 +13,19 @@
 //! ## ✨ Features
 //!
 //! - **Message Management**: Construct, send, and receive various message types, including text, media,
-//!   interactive messages (buttons, lists), and reactions.
+//!     interactive messages (buttons, lists), and reactions.
 //! - **Client API**: A fluent builder for authenticating and managing interactions with the WhatsApp Business API.
 //! - **Webhook Server**: Easily set up a webhook server to receive and process incoming messages and
-//!   message status updates with signature validation.
+//!     message status updates with signature validation.
 //! - **App Management**: Configure webhook subscriptions and manage onboarding flows for connecting businesses to your app.
 //! - **WABA Management**: Administer your WhatsApp Business Account, including listing catalogs,
-//!   managing phone numbers, and running guided phone number registration flows.
+//!     managing phone numbers, and running guided phone number registration flows.
 //! - **Catalog Management**: Programmatically manage your product catalogs, allowing you to list,
-//!   create, and update products.
+//!     create, and update products.
 //!
 //! ## 🚀 Examples
 //!
 //! Here are some quick examples to get you started:
-//!
-//! ### Send a Simple Text Message
-//! ```rust,no_run
-//! use whatsapp_business_rs::message::Draft;
-//! use whatsapp_business_rs::Client;
-//!
-//! # async fn send_text_example() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = Client::new("YOUR_ACCESS_TOKEN").await?; // Initialize your client
-//! client.message("YOUR_BUSINESS_NUMBER_ID") // Replace with your WhatsApp Number ID
-//!       .send("+16012345678", "Hello from Rust! How can I help you today?") // Replace with recipient's phone number
-//!       .await?;
-//! println!("Text message sent!");
-//! # Ok(())
-//! # }
-//! ```
 //!
 //! ---
 //!
@@ -51,52 +36,147 @@
 //!
 //! # async fn create_client_example() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = Client::builder()
-//!       .timeout(Duration::from_secs(15))
-//!       .api_version("v19.0")
-//!       .connect("YOUR_ACCESS_TOKEN")
-//!       .await?;
+//!     .timeout(Duration::from_secs(15))
+//!     .api_version("v19.0")
+//!     .connect("YOUR_ACCESS_TOKEN")
+//!     .await?;
 //! # Ok(()) }
 //! ```
 //!
 //! ---
 //!
-//! ### Start a Webhook Server
+//! ### Send a Simple Text Message
 //! ```rust,no_run
-//! use whatsapp_business_rs::{
-//!     client::Client,
-//!     server::{Server, Handler, EventContext, IncomingMessage},
-//!     Error
-//! };
+//! use whatsapp_business_rs::{Client, Draft};
 //!
-//! struct MyHandler;
+//! # async fn send_text_example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Initialize your client with your access token
+//! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
 //!
-//! impl Handler for MyHandler {
-//!     async fn handle_message(&self, _ctx: EventContext, msg: IncomingMessage) {
-//!         println!("{:#?}", msg);
-//!         // If feature incoming_message_ext is enabled
-//!         # #[cfg(feature = "incoming_message_ext")]
-//!         # {
-//!         msg.reply("Thanks for your message!").await.unwrap();
-//!         # }
-//!     }
-//! }
+//! // Replace with your WhatsApp Phone Number ID and recipient's phone number
+//! let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
+//! let recipient_phone_number = "+16012345678";
 //!
-//! # async fn start_server_example() {
-//! let server = Server::builder()
-//!     .endpoint("127.0.0.1:8080".parse().unwrap())
-//!     .build();
+//! // Send a text message
+//! client
+//!     .message(sender_phone_id)
+//!     .send(recipient_phone_number, Draft::text("Hello from Rust! How can I help you today?"))
+//!     .await?;
 //!
-//! // If feature incoming_message_ext is enabled.
-//! // Client is needed for interacting with the API.
-//! # #[cfg(feature = "incoming_message_ext")]
-//! # {
-//! let client = Client::new("ACCESS_TOKEN").await.unwrap();    
-//! server.serve(MyHandler, client).await.unwrap();
+//! println!("Text message sent!");
+//! # Ok(())
 //! # }
-//! # #[cfg(not(feature = "incoming_message_ext"))]
-//! # {
-//! server.serve(MyHandler).await.unwrap();
+//! ```
+//!
+//! ---
+//!
+//! ### Send a Media Message (e.g., Video)
+//! ```rust,no_run
+//! use whatsapp_business_rs::{Client, Media};
+//!
+//! # async fn send_video_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+//!
+//! let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
+//! let recipient_phone_number = "+16012345678";
+//!
+//! // Example: Send a video from a file path
+//! // Make sure to replace "path/to/your/video.mp4" with an actual path
+//! let video = Media::from_path("path/to/your/video.mp4")
+//!     .await?
+//!     .caption("Check out this cool video!");
+//!
+//! client.message(sender_phone_id).send(recipient_phone_number, video).await?;
+//! println!("Video message sent!");
+//! # Ok(())
 //! # }
+//! ```
+//!
+//! ---
+//!
+//! ### Send a Location Message
+//! ```rust,no_run
+//! use whatsapp_business_rs::{Client, Location};
+//!
+//! # async fn send_location_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+//!
+//! let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
+//! let recipient_phone_number = "+16012345678";
+//!
+//! // Send a location message with name and address
+//! let location = Location::new(37.44216251868683, -122.16153582049394)
+//!     .name("Philz Coffee")
+//!     .address("101 Forest Ave, Palo Alto, CA 94301");
+//!
+//! client.message(sender_phone_id).send(recipient_phone_number, location).await?;
+//! println!("Location message sent!");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ---
+//!
+//! ### Send an Interactive Message (Call-to-Action Button)
+//! ```rust,no_run
+//! use whatsapp_business_rs::message::{InteractiveMessage, UrlButton};
+//! use whatsapp_business_rs::Client;
+//!
+//! # async fn send_cta_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+//!
+//! let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
+//! let recipient_phone_number = "+16012345678";
+//!
+//! // Create a URL button
+//! let button = UrlButton::new("https://example.com/purchase", "2 for price of 1");
+//!
+//! // Create an interactive message with the button and a body text
+//! let interactive_message = InteractiveMessage::new(
+//!     button,
+//!     "One-time offer for this shiny product. Hurry-up!"
+//! );
+//!
+//! client.message(sender_phone_id).send(recipient_phone_number, interactive_message).await?;
+//! println!("Call-to-Action message sent!");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ---
+//!
+//! ### Send an Interactive Message (List of Options)
+//! ```rust,no_run
+//! use whatsapp_business_rs::message::{InteractiveMessage, OptionList, OptionButton, Section};
+//! use whatsapp_business_rs::Client;
+//!
+//! # async fn send_option_list_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+//!
+//! let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
+//! let recipient_phone_number = "+16012345678";
+//!
+//! // Create sections with options
+//! let section = Section::new(
+//!     "Choose an option regarding your last order",
+//!     [
+//!         OptionButton::new("Cancels deliver", "Cancel", "cancel-delivery"),
+//!         OptionButton::new("Proceed with order", "Order", "proceed-with-order"),
+//!     ],
+//! );
+//!
+//! // Create an option list with the section and a global label
+//! let options = OptionList::new_section(section, "Delivery Options");
+//!
+//! // Create an interactive message with the option list, body, and footer
+//! let interactive_message = InteractiveMessage::new(
+//!     options,
+//!     "Sorry your delivery is delayed... would you like to cancel the order?",
+//! ).footer("Only 70% in refund");
+//!
+//! client.message(sender_phone_id).send(recipient_phone_number, interactive_message).await?;
+//! println!("Option list message sent!");
+//! # Ok(())
 //! # }
 //! ```
 //!
@@ -105,7 +185,7 @@
 //! ### Configure a Webhook
 //! ```rust,no_run
 //! use whatsapp_business_rs::{
-//!     app::{SubscriptionField, WebhookConfig},
+//!     app::SubscriptionField,
 //!     client::Client,
 //!     App,
 //! };
@@ -122,10 +202,86 @@
 //!             SubscriptionField::Messages,
 //!             SubscriptionField::MessageTemplateStatusUpdate,
 //!         ]
-//!         .into(),
+//!     .into(),
 //!     )
 //!     .await?;
 //! # Ok(()) }
+//! ```
+//!
+//! ---
+//!
+//! ### Start a Webhook Server and Echo Messages
+//! ```rust,no_run
+//! use whatsapp_business_rs::{
+//!     client::Client,
+//!     server::{Server, WebhookHandler, EventContext, IncomingMessage},
+//!     app::SubscriptionField,
+//!     Auth,
+//! };
+//! use std::error::Error;
+//!
+//! // Define a handler struct for incoming webhook events
+//! #[derive(Debug)]
+//! struct EchoServerHandler {
+//!     client: Client, // Store a client to send replies
+//! }
+//!
+//! impl EchoServerHandler {
+//!     fn new(client: Client) -> Self {
+//!         Self { client }
+//!     }
+//! }
+//!
+//! impl WebhookHandler for EchoServerHandler {
+//!     // This method handles incoming messages
+//!     async fn handle_message(
+//!         &self,
+//!         _ctx: EventContext,
+//!         message: IncomingMessage,
+//!     ) {
+//!         println!("Received message: {:#?}", message);
+//!         let message = message.into_inner();
+//!         // Echo the received message content back to the sender
+//!         if let Err(e) = self.client
+//!             .message(message.recipient) // The recipient for the echo is the original sender's ID
+//!             .send(message.sender, message.content) // Send the same content back
+//!             .await
+//!         {
+//!             eprintln!("Failed to send echo message: {}", e);
+//!         }
+//!     }
+//! }
+//!
+//! # async fn start_webhook_server_example() -> Result<(), Box<dyn Error>> {
+//! // Initialize a client with your app token (or system user token)
+//! // For app actions, it's recommended to use `Auth::secret`
+//! let client = Client::new(Auth::secret(("YOUR_APP_ID", "YOUR_APP_SECRET"))).await?;
+//!
+//! // Your public webhook URL (e.g., from ngrok) and verify token
+//! let webhook_url = "https://your-ngrok-url.ngrok-free.app/webhook"; // Replace with your actual URL
+//! let verify_token = "my_super_secret_verify_token";
+//!
+//! // Configure the webhook subscription with Meta
+//! let pending_configure = client
+//!     .app("YOUR_APP_ID") // Replace with your app ID
+//!     .configure_webhook((webhook_url, verify_token))
+//!     .events([SubscriptionField::Messages].into()); // Subscribe to message events
+//!
+//! // Create an instance of your webhook handler
+//! let handler = EchoServerHandler::new(client);
+//!
+//! // Build and start the webhook server
+//! Server::builder()
+//!     .endpoint("127.0.0.1:8080".parse().unwrap()) // The local address where your server will listen
+//!     .verify_payload("YOUR_APP_SECRET") // Use your app secret for payload verification
+//!     .build()
+//!     .serve(handler)
+//!     .configure_webhook(verify_token, pending_configure) // Register webhook with Meta through the server
+//!     .await?;
+//!
+//! println!("Webhook server started and configured!");
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ---

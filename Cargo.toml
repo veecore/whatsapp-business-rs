@@ -1,6 +1,6 @@
 [package]
 name = "whatsapp-business-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Victor <victorayo206@example.com>"]
 description = "A modern Rust SDK for the WhatsApp Business Platform — send messages, manage catalogs, integrate webhooks, and build automated business flows with type safety and async elegance."
@@ -12,6 +12,7 @@ keywords = ["whatsapp", "rust", "sdk", "messaging", "async"]
 categories = ["api-bindings", "web-programming::http-client", "network-programming", "asynchronous"]
 homepage = "https://github.com/veecore/whatsapp-business-rs"
 build = "build.rs"
+exclude = [".github", "assets"]
 
 [dependencies]
 reqwest = { version = "0.11", features = ["json", "multipart"] }
