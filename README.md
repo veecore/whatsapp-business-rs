@@ -76,12 +76,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		.await?;
 	println!("Text message sent!");
 
-    // For multi-tenant applications, you can specify an alternate token for a specific message:
-    client.message(business_phone_id)
-        .send(recipient_number, "This message uses a different token!")
-        .with_auth("ANOTHER_BUSINESS_ACCESS_TOKEN")
-        .await?;
-    println!("Text message sent with an alternate token!");
+	// For multi-tenant applications, you can specify an alternate token for a specific message:
+	client.message(business_phone_id)
+	    .send(recipient_number, "This message uses a different token!")
+	    .with_auth("ANOTHER_BUSINESS_ACCESS_TOKEN")
+	    .await?;
+	println!("Text message sent with an alternate token!");
 
 	Ok(())
 }
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		.api_version("v19.0")
 		.connect("YOUR_ACCESS_TOKEN")
 		.await?;
-    println!("Client created with custom timeout and API version!");
+	println!("Client created with custom timeout and API version!");
 	Ok(())
 }
 ```

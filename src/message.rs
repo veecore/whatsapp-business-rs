@@ -486,32 +486,12 @@ impl Media {
     /// # Example
     /// ```rust
     /// use whatsapp_business_rs::message::Media;
-    /// # let image_bytes = [u8;1024];
+    /// # let image_bytes = [0_u8;1024];
     ///
     /// let mp4_video = Media::mp4(image_bytes);
     /// ```
     pub fn mp4(media_source: impl Into<MediaSource>) -> Self {
         Self::new(media_source, MediaType::Video(VideoExtension::Mp4))
-    }
-
-    pub fn is_audio(&self) -> bool {
-        matches!(self.media_type, MediaType::Audio(_))
-    }
-
-    pub fn is_document(&self) -> bool {
-        matches!(self.media_type, MediaType::Document(_))
-    }
-
-    pub fn is_image(&self) -> bool {
-        matches!(self.media_type, MediaType::Image(_))
-    }
-
-    pub fn is_sticker(&self) -> bool {
-        matches!(self.media_type, MediaType::Sticker(_))
-    }
-
-    pub fn is_video(&self) -> bool {
-        matches!(self.media_type, MediaType::Video(_))
     }
 
     /// Create a `Media` struct by loading content from a file path.
@@ -610,6 +590,106 @@ impl Media {
             self.filename = Some(filename.into());
         }
         self
+    }
+
+    /// Checks if the media's type is audio.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the `media_type` is an audio variant, `false` otherwise.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::message::Media;
+    ///
+    /// let audio_media = Media::new("some_audio_id", "audio/ogg".parse().unwrap());
+    /// assert_eq!(audio_media.is_audio(), true);
+    ///
+    /// let image_media = Media::jpeg("https://example.com/photo.jpg");
+    /// assert_eq!(image_media.is_audio(), false);
+    /// ```
+    pub fn is_audio(&self) -> bool {
+        matches!(self.media_type, MediaType::Audio(_))
+    }
+
+    /// Checks if the media's type is a document.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the `media_type` is a document variant, `false` otherwise.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::message::Media;
+    ///
+    /// let document_media = Media::document("some_doc_id", "report.pdf");
+    /// assert_eq!(document_media.is_document(), true);
+    ///
+    /// let video_media = Media::video("https://example.com/video.mp4");
+    /// assert_eq!(video_media.is_document(), false);
+    /// ```
+    pub fn is_document(&self) -> bool {
+        matches!(self.media_type, MediaType::Document(_))
+    }
+
+    /// Checks if the media's type is an image.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the `media_type` is an image variant, `false` otherwise.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::message::Media;
+    ///
+    /// let image_media = Media::jpeg("https://example.com/photo.jpg");
+    /// assert_eq!(image_media.is_image(), true);
+    ///
+    /// let sticker_media = Media::sticker("some_sticker_id");
+    /// assert_eq!(sticker_media.is_image(), false);
+    /// ```
+    pub fn is_image(&self) -> bool {
+        matches!(self.media_type, MediaType::Image(_))
+    }
+
+    /// Checks if the media's type is a sticker.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the `media_type` is a sticker variant, `false` otherwise.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::message::Media;
+    ///
+    /// let sticker_media = Media::sticker("some_sticker_id");
+    /// assert_eq!(sticker_media.is_sticker(), true);
+    ///
+    /// let audio_media = Media::new("some_audio_id", "audio/ogg".parse().unwrap());
+    /// assert_eq!(audio_media.is_sticker(), false);
+    /// ```
+    pub fn is_sticker(&self) -> bool {
+        matches!(self.media_type, MediaType::Sticker(_))
+    }
+
+    /// Checks if the media's type is a video.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the `media_type` is a video variant, `false` otherwise.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::message::Media;
+    ///
+    /// let video_media = Media::video("https://example.com/my_video.mp4");
+    /// assert_eq!(video_media.is_video(), true);
+    ///
+    /// let document_media = Media::document("some_doc_id", "report.pdf");
+    /// assert_eq!(document_media.is_video(), false);
+    /// ```
+    pub fn is_video(&self) -> bool {
+        matches!(self.media_type, MediaType::Video(_))
     }
 }
 

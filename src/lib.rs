@@ -72,7 +72,7 @@
 //!
 //! ### Send a Media Message (e.g., Video)
 //! ```rust,no_run
-//! use whatsapp_business_rs::{Client, Media};
+//! use whatsapp_business_rs::{Client, message::Media};
 //!
 //! # async fn send_video_example() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
@@ -96,7 +96,7 @@
 //!
 //! ### Send a Location Message
 //! ```rust,no_run
-//! use whatsapp_business_rs::{Client, Location};
+//! use whatsapp_business_rs::{Client, message::Location};
 //!
 //! # async fn send_location_example() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
@@ -214,7 +214,7 @@
 //! ```rust,no_run
 //! use whatsapp_business_rs::{
 //!     client::Client,
-//!     server::{Server, WebhookHandler, EventContext, IncomingMessage},
+//!     server::{Server, Handler, EventContext, IncomingMessage},
 //!     app::SubscriptionField,
 //!     Auth,
 //! };
