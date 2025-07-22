@@ -78,9 +78,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 	// For multi-tenant applications, you can specify an alternate token for a specific message:
 	client.message(business_phone_id)
-	    .send(recipient_number, "This message uses a different token!")
-	    .with_auth("ANOTHER_BUSINESS_ACCESS_TOKEN")
-	    .await?;
+		.send(recipient_number, "This message uses a different token!")
+		.with_auth("ANOTHER_BUSINESS_ACCESS_TOKEN")
+		.await?;
 	println!("Text message sent with an alternate token!");
 
 	Ok(())
@@ -123,8 +123,8 @@ async fn send_video_example() -> Result<(), Box<dyn std::error::Error>> {
 	// Example: Send a video from a file path
 	// Make sure to replace "path/to/your/video.mp4" with an actual path
 	let video = Media::from_path("path/to/your/video.mp4")
-	    .await?
-	    .caption("Check out this cool video!");
+		.await?
+		.caption("Check out this cool video!");
 
 	client.message(sender_phone_id).send(recipient_phone_number, video).await?;
 	println!("Video message sent!");
@@ -147,8 +147,8 @@ async fn send_location_example() -> Result<(), Box<dyn std::error::Error>> {
 
 	// Send a location message with name and address
 	let location = Location::new(37.44216251868683, -122.16153582049394)
-	    .name("Philz Coffee")
-	    .address("101 Forest Ave, Palo Alto, CA 94301");
+		.name("Philz Coffee")
+		.address("101 Forest Ave, Palo Alto, CA 94301");
 
 	client.message(sender_phone_id).send(recipient_phone_number, location).await?;
 	println!("Location message sent!");
@@ -175,8 +175,8 @@ async fn send_cta_example() -> Result<(), Box<dyn std::error::Error>> {
 
 	// Create an interactive message with the button and a body text
 	let interactive_message = InteractiveMessage::new(
-	    button,
-	    "One-time offer for this shiny product. Hurry-up!"
+		button,
+		"One-time offer for this shiny product. Hurry-up!"
 	);
 
 	client.message(sender_phone_id).send(recipient_phone_number, interactive_message).await?;
@@ -201,11 +201,11 @@ async fn send_option_list_example() -> Result<(), Box<dyn std::error::Error>> {
 
 	// Create sections with options
 	let section = Section::new(
-	    "Choose an option regarding your last order",
-	    [
-	        OptionButton::new("Cancels deliver", "Cancel", "cancel-delivery"),
-	        OptionButton::new("Proceed with order", "Order", "proceed-with-order"),
-	    ],
+		"Choose an option regarding your last order",
+		[
+			OptionButton::new("Cancels deliver", "Cancel", "cancel-delivery"),
+			OptionButton::new("Proceed with order", "Order", "proceed-with-order"),
+		],
 	);
 
 	// Create an option list with the section and a global label
@@ -213,8 +213,8 @@ async fn send_option_list_example() -> Result<(), Box<dyn std::error::Error>> {
 
 	// Create an interactive message with the option list, body, and footer
 	let interactive_message = InteractiveMessage::new(
-	    options,
-	    "Sorry your delivery is delayed... would you like to cancel the order?",
+		options,
+		"Sorry your delivery is delayed... would you like to cancel the order?",
 	).footer("Only 70% in refund");
 
 	client.message(sender_phone_id).send(recipient_phone_number, interactive_message).await?;

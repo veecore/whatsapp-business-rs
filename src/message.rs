@@ -486,7 +486,7 @@ impl Media {
     /// # Example
     /// ```rust
     /// use whatsapp_business_rs::message::Media;
-    /// # let image_bytes = [0_u8;1024];
+    /// # let image_bytes = [0_u8;1024].to_vec();
     ///
     /// let mp4_video = Media::mp4(image_bytes);
     /// ```
@@ -622,10 +622,10 @@ impl Media {
     /// ```rust
     /// use whatsapp_business_rs::message::Media;
     ///
-    /// let document_media = Media::document("some_doc_id", "report.pdf");
+    /// let document_media = Media::pdf("some_doc_id", "report.pdf");
     /// assert_eq!(document_media.is_document(), true);
     ///
-    /// let video_media = Media::video("https://example.com/video.mp4");
+    /// let video_media = Media::mp4("https://example.com/video.mp4");
     /// assert_eq!(video_media.is_document(), false);
     /// ```
     pub fn is_document(&self) -> bool {
@@ -682,10 +682,10 @@ impl Media {
     /// ```rust
     /// use whatsapp_business_rs::message::Media;
     ///
-    /// let video_media = Media::video("https://example.com/my_video.mp4");
+    /// let video_media = Media::mp4("https://example.com/my_video.mp4");
     /// assert_eq!(video_media.is_video(), true);
     ///
-    /// let document_media = Media::document("some_doc_id", "report.pdf");
+    /// let document_media = Media::pdf("some_doc_id", "report.pdf");
     /// assert_eq!(document_media.is_video(), false);
     /// ```
     pub fn is_video(&self) -> bool {

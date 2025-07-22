@@ -214,7 +214,7 @@
 //! ```rust,no_run
 //! use whatsapp_business_rs::{
 //!     client::Client,
-//!     server::{Server, Handler, EventContext, IncomingMessage},
+//!     server::{Server, WebhookHandler, EventContext, IncomingMessage},
 //!     app::SubscriptionField,
 //!     Auth,
 //! };
