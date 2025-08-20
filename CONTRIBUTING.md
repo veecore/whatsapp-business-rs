@@ -7,7 +7,7 @@ Thanks for considering contributing to this crate! 🎉 Whether it's code, docum
 
 1. Fork the repo and clone your fork:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/whatsapp-business-rs.git
+   git clone https://github.com/veecore/whatsapp-business-rs.git
    cd whatsapp-business-rs
 
 2. Set up your environment:
