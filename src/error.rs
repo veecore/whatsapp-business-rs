@@ -65,7 +65,14 @@ impl Error {
 /// This struct provides context such as the HTTP status code, the affected endpoint,
 /// and a more specific error kind.
 #[derive(thiserror::Error, Debug)]
-#[error("Service error at endpoint '{endpoint:?}': {kind} (HTTP status {status})")]
+#[cfg_attr(
+    debug_assertions,
+    error("Service error at endpoint '{endpoint:?}': {kind} (HTTP status {status})")
+)]
+#[cfg_attr(
+    not(debug_assertions),
+    error("Service error: {kind} (HTTP status {status})")
+)]
 #[non_exhaustive]
 pub struct ServiceError {
     pub(crate) status: StatusCode,
