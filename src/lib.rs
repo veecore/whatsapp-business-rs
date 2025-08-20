@@ -1,6 +1,6 @@
+#![deny(clippy::future_not_send)]
 #![allow(private_bounds)]
 #![allow(private_interfaces)]
-#![deny(clippy::future_not_send)]
 #![allow(unexpected_cfgs)]
 #![cfg_attr(nightly_rust, feature(impl_trait_in_assoc_type))]
 
@@ -64,6 +64,29 @@
 //!     .await?;
 //!
 //! println!("Text message sent!");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ---
+//!
+//! ### Send Bulk Messages with Batch 🚀
+//! ```rust,no_run
+//! use whatsapp_business_rs::Client;
+//!
+//! # #[cfg(feature = "batch")]
+//! # async fn send_batch_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+//!
+//! let sender = client.message("business_phone_id");
+//! let batch = client
+//!     .batch()
+//!         .include(sender.send("+1234567890", "Hi A!"))
+//!         .include(sender.send("+1234667809", "Hi B!"))
+//!         .include(sender.send("+1224537891", "Hi C!"));
+//!
+//! batch.execute().await?;
+//!
 //! # Ok(())
 //! # }
 //! ```
@@ -335,11 +358,14 @@
 //! ---
 
 pub mod app;
+#[cfg(feature = "batch")]
+pub mod batch;
 pub mod catalog;
 pub mod client;
 pub mod error;
 pub mod message;
 mod rest;
+#[cfg(feature = "server")]
 pub mod server;
 pub mod waba;
 
@@ -855,12 +881,21 @@ impl<T, U> Update<'_, T, U> {
     }
 }
 
+impl<T, U> Update<'_, T, U>
+where
+    T: Serialize + Send + 'static,
+{
+    pub(crate) fn request(self) -> RequestBuilder {
+        self.request.json(&self.item)
+    }
+}
+
 IntoFuture! {
-    impl<'a, T, U> Update<'a, T, U>
+    impl<T, U> Update<'_, T, U>
     [
     where
         T: Serialize + Send + 'static,
-        U: FromResponse + 'static,
+        U: FromResponseOwned + 'static,
     ]
     {
         /// Sends the update request with the configured fields.
@@ -894,9 +929,27 @@ IntoFuture! {
         /// # Ok(())}
         /// ```
         /// [`Error`]: crate::error::Error
-        pub async fn execute(self) -> Result<U, Error> {
-            let request = self.request.json(&self.item);
-            fut_net_op(request).await
+        pub fn execute(self) ->  impl Future<Output = Result<U, Error>> {
+            fut_net_op(self.request())
+        }
+    }
+}
+
+#[derive(Clone)]
+#[cfg(feature = "batch")]
+pub struct UpdateResponseReference<U> {
+    _priv: (),
+    _marker: PhantomData<U>,
+}
+
+#[cfg(feature = "batch")]
+impl<T, U> crate::batch::IntoResponseReference for Update<'_, T, U> {
+    type ResponseReference = UpdateResponseReference<U>;
+
+    fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
+        Self::ResponseReference {
+            _priv: (),
+            _marker: PhantomData,
         }
     }
 }
@@ -939,7 +992,7 @@ pub struct FlowStepSkipped;
 ///   }
 /// }
 /// ```
-#[derive(Serialize, Deserialize, PartialEq, Clone, Debug, Default)]
+#[derive(thiserror::Error, Serialize, Deserialize, PartialEq, Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct MetaError {
     // TODO: Add detail
@@ -960,6 +1013,38 @@ pub struct MetaError {
         skip_serializing_if = "MetaErrorMetadata::is_none"
     )]
     pub error_metadata: MetaErrorMetadata,
+}
+
+impl fmt::Display for MetaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(code: {})", self.code)?;
+
+        if let Some(title) = &self.title {
+            write!(f, " - {}", title)?;
+        }
+
+        if let Some(r#type) = &self.r#type {
+            write!(f, " (type: {})", r#type)?;
+        }
+
+        if let Some(message) = &self.message {
+            write!(f, ": {}", message)?;
+        }
+
+        if let Some(details) = &self.error_metadata.details {
+            writeln!(f, "\n  Details: {}", details)?;
+        }
+
+        if let Some(support) = &self.support {
+            writeln!(f, "\n  More info: {}", support)?;
+        }
+
+        if let Some(id) = &self.fbtrace_id {
+            writeln!(f, "\n  Trace ID: {}", id)?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Clone, Debug, Default)]
@@ -1007,18 +1092,36 @@ where
     fn to_value(self) -> Cow<'a, Value>;
 }
 
-impl<'a, Value, T> ToValue<'a, Value> for T
+impl<'a, Value> ToValue<'a, Value> for Cow<'a, Value>
 where
-    Value: From<String> + Clone + Send + Sync + 'a,
-    T: Into<String> + Send + Sync,
+    Value: Clone + Send + Sync,
 {
-    #[inline]
     fn to_value(self) -> Cow<'a, Value> {
-        Cow::Owned(Value::from(self.into()))
+        self
     }
 }
 
-impl From<String> for IdentityRef {
+impl<'a, Value> ToValue<'a, Value> for &'a str
+where
+    Value: From<&'a str> + Clone + Send + Sync,
+{
+    #[inline]
+    fn to_value(self) -> Cow<'a, Value> {
+        Cow::Owned(Value::from(self))
+    }
+}
+
+impl<'a, Value> ToValue<'a, Value> for String
+where
+    Value: From<String> + Clone + Send + Sync + 'a,
+{
+    #[inline]
+    fn to_value(self) -> Cow<'a, Value> {
+        Cow::Owned(Value::from(self))
+    }
+}
+
+impl<T: Into<String>> From<T> for IdentityRef {
     /// Implements conversion from a `String` into an `IdentityRef`.
     ///
     /// This allows for convenient creation of `IdentityRef` instances directly
@@ -1026,8 +1129,8 @@ impl From<String> for IdentityRef {
     /// to infer the `IdentityType` based on whether the string starts with a "+":
     ///
     /// - If the `value` starts with `+` (indicating an E.164 formatted phone number),
-    ///   it's treated as an [`IdentityRef::user`].
-    /// - Otherwise (e.g., a numerical ID), it's treated as an `IdentityRef::business`.
+    ///   it's treated as an [`IdentityType::User`].
+    /// - Otherwise (e.g., a numerical ID), it's treated as an [`IdentityType::Business`].
     ///
     /// # Arguments
     /// - `value`: The `String` representing the WhatsApp ID (phone number or phone number ID).
@@ -1047,7 +1150,8 @@ impl From<String> for IdentityRef {
     /// assert_eq!(business_ref.phone_id(), "123456789012345");
     /// assert_eq!(business_ref.identity_type(), IdentityType::Business);
     /// ```
-    fn from(value: String) -> Self {
+    fn from(value: T) -> Self {
+        let value = value.into();
         if value.starts_with("+") {
             IdentityRef::user(value)
         } else {
@@ -1111,7 +1215,7 @@ pub use message::{Draft, Message};
 pub use server::{Handler as WebhookHandler, Server};
 
 use reqwest::RequestBuilder;
-use rest::{fut_net_op, macros::view_ref, FieldsTrait, FromResponse};
+use rest::{fut_net_op, macros::view_ref, FieldsTrait, FromResponse, FromResponseOwned};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::HashSet, fmt, marker::PhantomData, ops::Deref};
 

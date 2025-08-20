@@ -4,6 +4,7 @@
 
 
 # ⚡️ whatsapp-business-rs
+
 [![Crates.io](https://img.shields.io/crates/v/whatsapp-business-rs)](https://crates.io/crates/whatsapp-business-rs)
 [![Docs.rs](https://docs.rs/whatsapp-business-rs/badge.svg)](https://docs.rs/whatsapp-business-rs)
 [![CI](https://github.com/veecore/whatsapp-business-rs/actions/workflows/ci.yaml/badge.svg)](https://github.com/veecore/whatsapp-business-rs/actions/workflows/ci.yaml)
@@ -11,53 +12,53 @@
 
 ### The ultimate Rust SDK for building badass WhatsApp Business integrations.
 
-`whatsapp-business-rs` is your all-in-one, type-safe, async-ready toolkit for harnessing the full power of Meta's WhatsApp Business Platform — built with love in Rust 🦀.
+`whatsapp-business-rs` is your all-in-one, type-safe, async-ready toolkit for harnessing the full power of Meta's WhatsApp Business Platform — built with love in Rust 🦀.  
 
-Whether you're sending messages, managing catalogs, automating onboarding, or spinning up a webhook server that never sleeps — this crate brings it all together in a blazing-fast, developer-first package.
+Whether you're sending messages, managing catalogs, automating onboarding, handling webhooks, or **batching thousands of API calls in one shot** — this crate brings it all together in a blazing-fast, developer-first package.
 
 -----
 
 ## ✨ Features That Matter
 
-✅ **Rich Message Support**
-Send text, images, video, documents, stickers, buttons, lists, reactions, and more — all with a single expressive API.
+- 📩 **Messaging** — send text, media, interactive buttons, templates, replies, and reactions.  
+- 📦 **Batch Requests** — compose and chain dependent API calls in a single round-trip.  
+- ⚡ **Webhook Server** — spin up an async webhook listener with signature validation.  
+- 👥 **Onboarding & Registration** — guide new numbers safely through setup.  
+- 🛒 **Catalog & Orders** — manage products and commerce flows.  
+🧑‍🤝‍🧑 **Multi-Tenant Ready**
+Easily serve **multiple WhatsApp Business Accounts** without friction.
+With `whatsapp-business-rs`, you can attach per-request authentication tokens instead of re-initializing clients — making it **ideal for SaaS platforms** and multi-business dashboards.
+- 🧩 **Feature Flags** — enable only what you need via Cargo features:  
+  - `batch` → batch requests  
+  - `server` → webhook server  
+  - `onboarding` → onboarding flows  
 
-✅ **First-Class Client API**
-A fluent, builder-based interface that makes requests feel like composing jazz — fast, elegant, and deeply ergonomic.
-
-✅ **Zero-Hassle Webhook Server**
-Spin up a signature-verified webhook in minutes — receive and respond to messages, status updates, and more with async power.
-
-✅ **WABA & App Management**
-Administer phone numbers, catalogs, subscriptions, and business onboarding flows — all programmatically.
-
-✅ **Catalog Commerce, the Rust Way**
-Create, update, and list your product catalogs like a pro. Rust safety, zero guesswork.
-
-✅ **Multi-Tenant Ready**
-Designed with flexibility in mind, `whatsapp-business-rs` supports multi-tenant applications by allowing you to specify different authentication tokens for individual requests, eliminating the need to re-initialize the client for each business account. This is perfect for SaaS platforms managing multiple WhatsApp Business Accounts\!
 
 -----
 
 ## 📦 Installation
 
-Add this to your `Cargo.toml`:
+```sh
+cargo add whatsapp-business-rs --features incoming_message_ext
+````
 
-```toml
-[dependencies]
-whatsapp-business-rs = "0.1.1" # Use the latest version
-```
-
-Need direct message replies via incoming messages? Enable the feature:
-
-```toml
-[dependencies]
-whatsapp-business-rs = { version = "0.1.0", features = ["incoming_message_ext"] }
-```
+(Disable features you don’t need for smaller builds.)
 
 -----
 
-## 🚀 Quickstart Examples
+## 🚀 Getting Started with Meta
+
+Before diving in, you’ll need a few things from the [Meta for Developers dashboard](https://developers.facebook.com/docs/development/register):
+
+* **Access Token**
+* **Phone Number ID**
+* **Business Account ID**
+
+You’ll use these credentials to sign API requests.
+
+---
+
+## 📝 Quickstart Examples
 
 ### 🔹 Send a Message (Text)
 
@@ -86,6 +87,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+---
+
+### Send Bulk Messages with Batch 🚀
+
+```rust
+use whatsapp_business_rs::Client;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new("YOUR_ACCESS_TOKEN").await?;
+
+    let sender = client.message(business_phone_id);
+    let batch = client
+        .batch()
+        .include(sender.send("+1234567890", "Hi A!"))
+        .include(sender.send("+1234667809", "Hi B!"))
+        .include(sender.send("+1224537891", "Hi C!"));
+
+    batch.execute().await?;
+
+    Ok(())
+}
+```
+
+Batching reduces round-trips and lets you chain dependent requests using symbolic references
 
 -----
 
@@ -374,6 +401,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## 🔧 Work in Progress
 
 This crate is young but fierce. We're actively improving coverage across message templates, contacts, and more. Contributions are always welcome\!
+
+-----
+
+## 🤝 Contributing
+
+Contributions are very welcome! Open an issue, suggest features, or send a PR.
 
 -----
 

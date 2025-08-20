@@ -755,7 +755,7 @@ pub trait Handler: Send + Sync {
         &self,
         _ctx: EventContext,
         _msg: IncomingMessage,
-    ) -> impl Future<Output = ()> + Send {
+    ) -> impl Future<Output = ()> + Send + '_ {
         async {}
     }
 
@@ -764,7 +764,7 @@ pub trait Handler: Send + Sync {
         &self,
         _ctx: EventContext,
         _update: MessageUpdate,
-    ) -> impl Future<Output = ()> + Send {
+    ) -> impl Future<Output = ()> + Send + '_ {
         async {}
     }
 
@@ -773,7 +773,7 @@ pub trait Handler: Send + Sync {
         &self,
         _ctx: EventContext,
         _waba_event: WabaEvent,
-    ) -> impl Future<Output = ()> + Send {
+    ) -> impl Future<Output = ()> + Send + '_ {
         async {}
     }
 
@@ -782,10 +782,29 @@ pub trait Handler: Send + Sync {
         &self,
         _ctx: ErrorContext,
         error: Box<dyn std::error::Error + Send>,
-    ) -> impl Future<Output = ()> + Send {
+    ) -> impl Future<Output = ()> + Send + '_ {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         async move {
-            eprintln!("Server error: {error}");
+            // Get the current time since UNIX_EPOCH
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+            // Format as seconds + milliseconds
+            let secs = now.as_secs();
+            let millis = now.subsec_millis();
+
+            eprintln!("[{secs}.{millis:03}] Server error: {error}");
         }
+    }
+}
+
+impl<F, Fut> Handler for F
+where
+    Fut: Future<Output = ()> + Send,
+    F: FnOnce(EventContext, Event) -> Fut + Send + Sync + Clone,
+{
+    fn handle(&self, ctx: EventContext, event: Event) -> impl Future<Output = ()> + Send {
+        (self.clone())(ctx, event)
     }
 }
 
@@ -1119,5 +1138,3 @@ where
         self.message.eq(other)
     }
 }
-
-// TODO: Implement handler for callbacks

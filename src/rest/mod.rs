@@ -2,6 +2,7 @@ use std::{borrow::Cow, fmt::Debug, hash::Hash, marker::PhantomData};
 
 use crate::{
     app::{Token, TokenDebug},
+    batch::AResponse,
     catalog::Product,
     client::{Auth, Client, MessageManager},
     derive,
@@ -19,7 +20,7 @@ use client::{
 };
 use futures::TryStream;
 use reqwest::RequestBuilder;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 pub(crate) mod client;
 pub(crate) mod macros;
@@ -27,25 +28,25 @@ pub(crate) mod server;
 
 pub(crate) use macros::{AdjacentHelper, BuilderInto};
 /// Trait for types that can be deserialized from API responses
-pub(crate) trait FromResponse: Sized + Send + 'static {
+pub(crate) trait FromResponse<'a>: Sized + Send {
     /// The raw response type that will be deserialized
-    type Response<'a>: Deserialize<'a> + Debug + Send;
+    type Response: Deserialize<'a> + Debug + Send;
 
     // TODO: Restore when necessary
     /// Deserialize from raw API response
     /* async */
-    fn from_response<'a>(
-        response: Self::Response<'a>,
+    fn from_response(
+        response: Self::Response,
         // client: &Client,
     ) -> Result<Self, ServiceErrorKind>;
 }
 
+pub(crate) trait FromResponseOwned: for<'a> FromResponse<'a> {}
+impl<T> FromResponseOwned for T where T: for<'de> FromResponse<'de> {}
+
 // FIXME: Make less annoying and make preparation fallible
 pub(crate) trait IntoMessageRequest: Sized + Send {
-    /// The serializable request type
-    type Request: Serialize + Debug + Send;
-
-    type Output: IntoMessageRequestOutput<Request = Self::Request>;
+    type Output;
 
     /// Convert into API request format
     fn into_request<'i, 't>(
@@ -55,10 +56,11 @@ pub(crate) trait IntoMessageRequest: Sized + Send {
     ) -> Self::Output;
 }
 
-pub(crate) trait IntoMessageRequestOutput: Sized + Send {
+pub(crate) trait IntoMessageRequestOutput: /*crate::batch::Requests<ResponseReference = Self::Request> +*/ Sized + Send {
+    /// The serializable request type
     type Request;
 
-    fn with_auth(self, auth: &Auth) -> Self;
+    fn with_auth(self, auth: Cow<'_, Auth>) -> Self;
 
     async fn execute(self) -> Result<Self::Request, Error>;
 }
@@ -69,10 +71,6 @@ pub(crate) trait IntoMessageRequestOutput: Sized + Send {
 // #[derive(Debug)]
 // struct AsyncRequestBuilder {}
 
-/// Helper struct for carrying additional context during request conversion
-#[allow(unused)]
-pub(crate) struct With<T, C>(pub(crate) T, pub(crate) C);
-
 pub(crate) struct ReadyOutput<T> {
     inner: T,
 }
@@ -81,7 +79,7 @@ impl<T: Send> IntoMessageRequestOutput for ReadyOutput<T> {
     type Request = T;
 
     #[inline(always)]
-    fn with_auth(self, _auth: &Auth) -> Self {
+    fn with_auth(self, _: Cow<'_, Auth>) -> Self {
         self
     }
 
@@ -91,13 +89,31 @@ impl<T: Send> IntoMessageRequestOutput for ReadyOutput<T> {
     }
 }
 
+#[cfg(feature = "batch")]
+impl<T: Send> crate::batch::Requests for ReadyOutput<T> {
+    type BatchHandler = ();
+
+    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
+
+    fn into_batch_ref(
+        self,
+        _: &mut crate::batch::Formatter,
+    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
+        Ok(((), self.inner))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(0))
+    }
+
+    crate::requests_batch_include! {}
+}
+
 // Macro to implement IntoRequest for serializable types
 macro_rules! impl_into_request_for_serializable {
     ($($ty:ty),* $(,)?) => {
         $(
             impl IntoMessageRequest for $ty {
-                type Request = $ty;
-
                 type Output = ReadyOutput<$ty>;
 
                 fn into_request<'i, 't>(
@@ -116,10 +132,10 @@ macro_rules! impl_into_request_for_serializable {
 macro_rules! impl_from_response_for_deserializable {
     ($($ty:ty),* $(,)?) => {
         $(
-            impl FromResponse for $ty {
-                type Response<'a> = $ty;
+            impl<'a> FromResponse<'a> for $ty {
+                type Response = $ty;
 
-                fn from_response<'a>(response: Self::Response<'a>) -> Result<Self, ServiceErrorKind>
+                fn from_response(response: Self::Response) -> Result<Self, ServiceErrorKind>
                 {
                     Ok(response)
                 }
@@ -138,8 +154,8 @@ impl_into_request_for_serializable!(
     ErrorContent
 );
 
+// These for from_response from webhook payload
 impl_from_response_for_deserializable!(
-    Product,
     Media,
     InteractiveHeaderMedia,
     Location,
@@ -150,6 +166,11 @@ impl_from_response_for_deserializable!(
     Order,
     ErrorContent,
     MediaInfo,
+);
+
+// These for from_response from active client interaction
+impl_from_response_for_deserializable!(
+    Product,
     MediaUploadResponse,
     SuccessStatus,
     SendMessageResponse,
@@ -159,6 +180,7 @@ impl_from_response_for_deserializable!(
     RegisterResponse,
     Token,
     ShareCreditLineResponse,
+    AResponse
 );
 
 #[derive(Deserialize, Debug)]
@@ -166,19 +188,19 @@ pub(crate) struct UnnecessaryDataWrapper<T> {
     data: T,
 }
 
-impl FromResponse for TokenDebug {
-    type Response<'a> = UnnecessaryDataWrapper<TokenDebug>;
+impl<'a> FromResponse<'a> for TokenDebug {
+    type Response = UnnecessaryDataWrapper<TokenDebug>;
 
-    fn from_response<'a>(response: Self::Response<'a>) -> Result<Self, ServiceErrorKind> {
+    fn from_response(response: Self::Response) -> Result<Self, ServiceErrorKind> {
         Ok(response.data)
     }
 }
 // Implementations for std container types
 
-impl<T: FromResponse> FromResponse for Vec<T> {
-    type Response<'a> = Vec<<T as FromResponse>::Response<'a>>;
+impl<'a, T: FromResponse<'a>> FromResponse<'a> for Vec<T> {
+    type Response = Vec<<T as FromResponse<'a>>::Response>;
 
-    fn from_response<'a>(response: Self::Response<'a>) -> Result<Self, ServiceErrorKind> {
+    fn from_response(response: Self::Response) -> Result<Self, ServiceErrorKind> {
         let mut results = Vec::with_capacity(response.len());
         for item in response {
             results.push(T::from_response(item)?);
@@ -194,7 +216,7 @@ where
     type Request = Option<T::Request>;
 
     #[inline]
-    fn with_auth(mut self, auth: &Auth) -> Self {
+    fn with_auth(mut self, auth: Cow<'_, Auth>) -> Self {
         self = self.map(|output| output.with_auth(auth));
         self
     }
@@ -209,8 +231,6 @@ where
 }
 
 impl<T: IntoMessageRequest> IntoMessageRequest for Option<T> {
-    type Request = Option<T::Request>;
-
     type Output = Option<T::Output>;
 
     fn into_request<'i, 't>(
@@ -222,10 +242,10 @@ impl<T: IntoMessageRequest> IntoMessageRequest for Option<T> {
     }
 }
 
-impl<T: FromResponse> FromResponse for Option<T> {
-    type Response<'a> = Option<<T as FromResponse>::Response<'a>>;
+impl<'a, T: FromResponse<'a>> FromResponse<'a> for Option<T> {
+    type Response = Option<<T as FromResponse<'a>>::Response>;
 
-    fn from_response<'a>(response: Self::Response<'a>) -> Result<Self, ServiceErrorKind> {
+    fn from_response(response: Self::Response) -> Result<Self, ServiceErrorKind> {
         match response {
             Some(r) => {
                 let value = T::from_response(r)?;
@@ -234,6 +254,14 @@ impl<T: FromResponse> FromResponse for Option<T> {
             None => Ok(None),
         }
     }
+}
+
+// This is because of the persistent compiler normalization issue
+pub(crate) fn option_from_response_default<'a, T>() -> <Option<T> as FromResponse<'a>>::Response
+where
+    T: FromResponse<'a>,
+{
+    None
 }
 
 derive! {
@@ -272,8 +300,23 @@ pub struct Pager<Item> {
 
 impl<Item> Pager<Item>
 where
-    Item: FromResponse,
+    Item: FromResponseOwned,
 {
+    // pub(crate) async fn next_page(
+    //     self,
+    // ) -> Result<(impl Iterator<Item = Item>, RequestBuilder), Error> {
+    //     let next_request = self.request.try_clone().unwrap();
+
+    //     // There's the page_token on this one
+    //     let page: Page<Item> = fut_net_op(self.request).await?;
+    //     let (items, token) = page.into_parts();
+
+    //     // FIXME: The page_token param on this keeps building up since no overwrite occurs
+    //     let next_request = next_request.query(&[("page_token", token)]);
+
+    //     Ok((items.into_iter(), next_request))
+    // }
+
     pub(crate) fn stream(self) -> impl TryStream<Ok = Item, Error = Error> {
         Box::pin(try_stream! {
             let mut next_page_token = None;
@@ -304,26 +347,43 @@ where
 #[macro_export]
 #[doc(hidden)]
 macro_rules! handle_arg {
-    ($request:expr, $response:ident, $endpoint:ident) => {{
+    ($request:expr) => {{
         let (client, request) = $request.build_split();
         // FIXME: endpoint = lost...
         let request = request.map_err(|err| Error::internal(err.into()))?;
         // potential waste
-        $endpoint = Cow::<'_, str>::Owned(request.url().as_str().to_owned());
-        $response = client.execute(request).await?;
+        #[cfg(debug_assertions)]
+        let endpoint = Cow::<'_, str>::Owned(request.url().as_str().to_owned());
+        let response = client.execute(request).await?;
+        #[cfg(debug_assertions)]
+        {
+            (response, endpoint)
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            response
+        }
     }};
 }
 
 // Make macros?
 #[inline(always)]
-pub(crate) async fn fut_net_op<T: FromResponse>(request: RequestBuilder) -> Result<T, Error> {
-    let (response, endpoint);
-    handle_arg!(request, response, endpoint);
-    Client::handle_response(response, endpoint).await
+pub(crate) async fn fut_net_op<T: FromResponseOwned>(request: RequestBuilder) -> Result<T, Error> {
+    let r_e = handle_arg!(request);
+    #[cfg(debug_assertions)]
+    {
+        Client::handle_response(r_e.0, r_e.1).await
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        Client::handle_response(r_e).await
+    }
 }
 
 #[inline(always)]
-pub(crate) fn stream_net_op<T: FromResponse>(
+pub(crate) fn stream_net_op<T: FromResponseOwned>(
     request: RequestBuilder,
 ) -> impl TryStream<Ok = T, Error = Error> {
     let pager = Pager {

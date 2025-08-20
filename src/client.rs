@@ -38,19 +38,17 @@
 
 use super::error::Error;
 use crate::{
+    add_auth_to_request,
     app::{AppManager, Token},
     catalog::CatalogManager,
-    message::{IntoDraft, MediaType, MessageCreate, MessageRef},
+    message::{IntoDraft, MediaSource, MediaType, MessageCreate, MessageRef},
     rest::{
-        client::{
-            AccessTokenRequest, DeleteMedia as InnerDeleteMedia, MessageRequestOutput,
-            UploadMedia as InnerUploadMedia,
-        },
+        client::{AccessTokenRequest, MessageRequestOutput, SendMessageResponse},
         fut_net_op, IntoMessageRequestOutput,
     },
     to_value,
     waba::WabaManager,
-    App, CatalogRef, Endpoint, IdentityRef, IntoFuture, SimpleOutput, ToValue, Waba,
+    App, CatalogRef, Endpoint, IdentityRef, IntoFuture, NullableUnit, SimpleOutput, ToValue, Waba,
 };
 
 use reqwest::{
@@ -61,6 +59,9 @@ use std::{
     borrow::Cow, fmt::Display, marker::PhantomData, mem::transmute, ops::Deref, sync::Arc,
     time::Duration,
 };
+
+#[cfg(feature = "batch")]
+use crate::{batch::Batch, reference, requests_batch_include};
 
 /// Default API version for WhatsApp Business API
 const DEFAULT_API_VERSION: &str = "22.0";
@@ -214,6 +215,34 @@ pub enum Auth {
         app_id: String,
         app_secret: AppSecret,
     },
+
+    /// Represents a pre-parsed and optimized authentication token.
+    ///
+    /// This variant is backed by the `bytes::Bytes` type, making it highly efficient for cloning and sharing.
+    /// It is ideal for situations where authentication credentials are used frequently in-memory, as it helps
+    /// to reduce memory usage and allocation overhead.
+    ///
+    /// #### **Creation**
+    ///
+    /// You cannot create a `Parsed` variant directly. Instead, you must first create an `Auth::Token` or `Auth::Secret`
+    /// variant and then convert it to `Auth::Parsed`.
+    ///
+    /// #### **Example**
+    ///
+    /// ```rust
+    /// use whatsapp_business_rs::Auth;
+    ///
+    /// // Example 1: Creating a Parsed token from a direct token
+    /// let parsed_auth_token = Auth::token("YOUR_ACCESS_TOKEN_STRING").parsed();
+    ///
+    /// // Example 2: Creating a Parsed token from an App ID and Secret
+    /// let app_id = "YOUR_APP_ID";
+    /// let app_secret = "YOUR_APP_SECRET";
+    /// let parsed_auth_secret = Auth::secret((app_id, app_secret)).parsed();
+    ///
+    /// // You can now use parsed_auth_token or parsed_auth_secret with minimal memory overhead
+    /// ```
+    Parsed(ParsedAuth),
 }
 
 impl Auth {
@@ -265,6 +294,25 @@ impl Auth {
             app_secret: secret.1.to_value().into_owned(),
         }
     }
+
+    /// This method converts the current Auth variant (either Token or Secret) into
+    /// an optimized `Auth::Parsed` variant.
+    ///
+    /// This conversion process prepares the authentication data for efficient use,
+    /// particularly for in-memory operations. It's especially useful for reducing
+    /// memory overhead and allocation costs when the authentication data needs to be
+    /// frequently cloned or shared.
+    ///
+    /// If the conversion fails, it returns an AuthParsedError, which provides details
+    /// about the underlying reason for the failure.
+    pub fn parsed(self) -> Result<Self, AuthParsedError> {
+        // Our try_into adds Bearer
+        let parsed = self
+            .try_into()
+            .map_err(|err| AuthParsedError { inner: err })?;
+
+        Ok(Self::Parsed(ParsedAuth { header: parsed }))
+    }
 }
 
 /// A wrapper struct for a **WhatsApp Business API access token** string.
@@ -294,6 +342,16 @@ pub struct TokenAuth(pub String);
 /// let app_secret = AppSecret("YOUR_APP_SECRET_STRING_HERE".to_string());
 #[derive(PartialEq, Clone, Debug)]
 pub struct AppSecret(pub String);
+
+/// A parsed representation of the authentication token for an API client.
+///
+/// This struct holds the authentication token data in a format suitable for
+/// use in HTTP request headers.
+#[derive(PartialEq, Clone, Debug)]
+pub struct ParsedAuth {
+    /// The authentication token data, formatted for an HTTP header.
+    header: reqwest::header::HeaderValue,
+}
 
 impl Client {
     /// Creates a new client with default configuration.
@@ -418,6 +476,48 @@ impl Client {
     {
         AppManager::new(a.to_value(), self)
     }
+
+    /// Create a new [`Batch`] for grouping multiple requests into a single network call.
+    ///
+    /// Batching reduces network overhead and enables advanced workflows,
+    /// like uploading media once and reusing it across multiple messages.
+    /// This is especially useful for **bulk messaging scenarios**, where you want to send
+    /// several messages in one go while staying within Meta's platform policies.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use whatsapp_business_rs::Client;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::new("YOUR-API-KEY").await?;
+    ///
+    /// // ⚠️ Always ensure your bulk messaging complies with Meta’s rules.
+    /// // Sending unsolicited or spammy messages can lead to account restrictions.
+    /// let recipients = ["+1111111111", "+2222222222", "+3333333333"];
+    ///
+    /// let output = client
+    ///     .batch()
+    ///     .include_iter(
+    ///         recipients.into_iter().map(|r| client.message("SENDER").send(r, "Promo: 20% off today!"))
+    ///     )
+    ///     .execute()
+    ///     .await?;
+    ///
+    /// // Flatten results for easy handling
+    /// for (i, result) in output.result()?.into_iter().enumerate() {
+    ///     match result {
+    ///         Ok(res) => println!("Message {i} sent: {}", res.message_id()),
+    ///         Err(e) => eprintln!("Failed to send message {i}: {e:#}"),
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// See [`Batch`] for more details on adding requests and combining results.
+    #[cfg(feature = "batch")]
+    pub fn batch(&self) -> Batch {
+        Batch::new(self)
+    }
 }
 
 /// Creates a new [`Client`] with default settings.
@@ -434,6 +534,7 @@ impl Client {
 pub struct ClientBuilder {
     http: HttpClientBuilder,
     api_version: &'static str,
+    error: Option<Error>,
 }
 
 impl Default for ClientBuilder {
@@ -441,6 +542,7 @@ impl Default for ClientBuilder {
         Self {
             http: HttpClientBuilder::new(),
             api_version: DEFAULT_API_VERSION,
+            error: None,
         }
     }
 }
@@ -486,6 +588,87 @@ impl ClientBuilder {
         self
     }
 
+    /// This method configures the client to use a specific authentication token
+    /// for subsequent API requests. It consumes the builder and returns a new one
+    /// with the authentication settings applied.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use whatsapp_business_rs::client::{ClientBuilder, Auth};
+    ///
+    /// // Create a builder and add an authentication token
+    /// let builder = ClientBuilder::new()
+    ///     .auth("your_access_token");
+    /// ```
+    ///
+    /// [`Auth`]: crate::client::Auth
+    pub fn auth<'a, A: ToValue<'a, Auth>>(mut self, auth: A) -> Self {
+        fn add_auth(headers: &mut HeaderMap, auth: Cow<'_, Auth>) -> Result<(), Error> {
+            match auth {
+                Cow::Owned(auth) => {
+                    headers.insert(reqwest::header::AUTHORIZATION, auth.try_into()?);
+                    Ok(())
+                }
+                Cow::Borrowed(auth) => {
+                    headers.insert(reqwest::header::AUTHORIZATION, auth.try_into()?);
+                    Ok(())
+                }
+            }
+        }
+
+        let mut headers = HeaderMap::new();
+        if let Err(err) = add_auth(&mut headers, auth.to_value()) {
+            self.error = Some(err);
+            return self;
+        }
+
+        self.http = self.http.default_headers(headers);
+        self
+    }
+
+    /// Finishes building the client and creates a new, unauthenticated or authenticated
+    /// instance depending on whether auth was called.
+    ///
+    /// This method concludes the client configuration and returns a `Client`
+    /// instance. It is typically used after setting up other client properties
+    /// like the timeout or user agent, but without providing an authentication
+    /// token directly.
+    ///
+    /// To build a client with authentication, you can use the `auth` method
+    /// before calling `build`, or use the convenience method `connect`.
+    ///
+    /// # Returns
+    /// A `Result` which is:
+    /// - `Ok(Client)`: A new, configured `Client` instance.
+    /// - `Err(Error)`: If any of the builder's methods failed or if there are
+    ///   other issues during client creation.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use whatsapp_business_rs::client::ClientBuilder;
+    ///
+    /// let client = ClientBuilder::new()
+    ///     .auth("your_access_token")
+    ///     .build()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// [`Client`]: crate::client::Client
+    /// [`Error`]: crate::error::Error
+    pub fn build(self) -> Result<Client, Error> {
+        if let Some(err) = self.error {
+            return Err(err);
+        }
+
+        let http_client = self.http.user_agent(USER_AGENT).build()?;
+        Ok(Client {
+            inner: Arc::new(InnerClient {
+                http_client,
+                endpoint: Endpoint::new(self.api_version),
+            }),
+        })
+    }
+
     /// Finishes building and connects the client using the given credentials.
     ///
     /// This asynchronous method attempts to establish a connection to the WhatsApp
@@ -525,23 +708,7 @@ impl ClientBuilder {
     /// [`Client`]: crate::client::Client
     /// [`Error`]: crate::error::Error
     pub async fn connect<'a, A: ToValue<'a, Auth>>(self, auth: A) -> Result<Client, Error> {
-        let auth = format!("Bearer {}", auth.to_value());
-        let mut auth: HeaderValue = auth
-            .parse()
-            .map_err(|err| Error::internal(format!("Invalid auth: {err}").into()))?;
-        auth.set_sensitive(true);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(reqwest::header::USER_AGENT, USER_AGENT.parse().unwrap());
-        headers.insert(reqwest::header::AUTHORIZATION, auth);
-
-        let http_client = self.http.default_headers(headers).build()?;
-        Ok(Client {
-            inner: Arc::new(InnerClient {
-                http_client,
-                endpoint: Endpoint::new(self.api_version),
-            }),
-        })
+        self.auth(auth).build()
     }
 }
 
@@ -725,8 +892,6 @@ impl<'i> MessageManager<'i> {
         }
     }
 
-    // TODO: Convo which holds sender and recipient
-
     /// Prepares to upload media (image, audio, video, document) to WhatsApp.
     ///
     /// This method returns an [`UploadMedia`] builder. The upload is performed when
@@ -758,9 +923,7 @@ impl<'i> MessageManager<'i> {
         media_type: MediaType,
         filename: impl Into<Cow<'static, str>>,
     ) -> UploadMedia {
-        UploadMedia {
-            inner: self.upload_media_inner(media, media_type.mime_type(), filename),
-        }
+        self.upload_media_inner(media, media_type.mime_type(), filename)
     }
 
     /// Prepares to delete previously uploaded media from WhatsApp servers.
@@ -786,9 +949,7 @@ impl<'i> MessageManager<'i> {
     /// ```
     #[inline]
     pub fn delete_media(&self, media_id: &str) -> DeleteMedia {
-        DeleteMedia {
-            inner: self.client.delete_media(media_id),
-        }
+        self.client.delete_media(media_id)
     }
 
     // To the identity not message
@@ -828,8 +989,8 @@ impl SendMessage<'_> {
     /// [`Auth`]: crate::client::Auth
     pub fn with_auth<'a>(mut self, auth: impl ToValue<'a, Auth>) -> Self {
         let auth = auth.to_value();
-        self.request = self.request.bearer_auth(&auth);
-        self.body = self.body.with_auth(&auth);
+        self.body = self.body.with_auth(Cow::Borrowed(&*auth));
+        self.request = add_auth_to_request!(auth => self.request);
         self
     }
 }
@@ -869,12 +1030,182 @@ IntoFuture! {
     }
 }
 
+#[cfg(feature = "batch")]
+impl<'a> crate::batch::Requests for SendMessage<'a> {
+    type BatchHandler = SendMessageHandler<'a>;
+
+    type ResponseReference = SendMessageResponseReference;
+
+    fn into_batch_ref(
+        self,
+        f: &mut crate::batch::Formatter,
+    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
+        let (h, body) = self.body.into_batch_ref(f)?;
+        let mut request = f.add_request(self.request.json(&body))?;
+        let reference = SendMessageResponseReference {
+            reference_id: request.get_name(),
+        };
+
+        let _debug = request.finish()?;
+        let handler = SendMessageHandler {
+            #[cfg(debug_assertions)]
+            endpoint: _debug.url.into(),
+            dep_handler: h,
+        };
+
+        Ok((handler, reference))
+    }
+
+    fn into_batch(
+        self,
+        f: &mut crate::batch::Formatter,
+    ) -> Result<Self::BatchHandler, crate::batch::FormatError>
+    where
+        Self: Sized,
+    {
+        let (h, body) = self.body.into_batch_ref(f)?;
+        let request = f.add_request(self.request.json(&body))?;
+        let _debug = request.finish()?;
+
+        Ok(SendMessageHandler {
+            #[cfg(debug_assertions)]
+            endpoint: _debug.url.into(),
+            dep_handler: h,
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (1 + self.body.size_hint().0, None)
+    }
+
+    requests_batch_include! {}
+}
+
+/// A symbolic reference to the response of a `SendMessage` request.
+///
+/// This type can be used directly in other requests that expect a
+/// `MessageRef`. This enables you to compose dependent requests
+/// within a batch without needing the concrete ID or field value upfront.
+///
+/// ## Notes
+/// - Still only valid inside a batch context.
+/// - Should not be inspected at runtime (no field access).
+/// - Implements `Clone` so it can be reused in multiple dependents.
+/// - Implements [`ToValue`] so it can stand in for `MessageRef`.
+#[derive(Clone)]
+#[cfg(feature = "batch")]
+pub struct SendMessageResponseReference {
+    reference_id: Cow<'static, str>,
+}
+
+#[cfg(feature = "batch")]
+impl ToValue<'_, MessageRef> for SendMessageResponseReference {
+    fn to_value(self) -> Cow<'static, MessageRef> {
+        let id = self.reference_id;
+        let ref_message_id = reference!(id => SendMessageResponse => [messages[0]] [id]);
+        Cow::Owned(MessageRef::from(ref_message_id))
+    }
+}
+
+#[cfg(feature = "batch")]
+impl<'a> ToValue<'a, MessageRef> for &'a SendMessageResponseReference {
+    fn to_value(self) -> Cow<'static, MessageRef> {
+        let id = &self.reference_id;
+        let ref_message_id = reference!(id => SendMessageResponse => [messages[0]] [id]);
+        Cow::Owned(MessageRef::from(ref_message_id))
+    }
+}
+
+#[cfg(feature = "batch")]
+pub struct SendMessageHandler<'a> {
+    #[cfg(debug_assertions)]
+    endpoint: Cow<'static, str>,
+    dep_handler: <MessageRequestOutput<'a> as crate::batch::Requests>::BatchHandler,
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::Handler for SendMessageHandler<'_> {
+    type Responses = Result<MessageCreate, Error>;
+
+    fn from_batch(
+        self,
+        response: &mut crate::batch::BatchResponse,
+    ) -> Result<Self::Responses, crate::batch::FromResponseError> {
+        // First read the possible dep requests... all we're interested
+        // in is the error and reading past
+        self.dep_handler.from_batch(response)?;
+
+        response.handle_next_typical(
+            #[cfg(debug_assertions)]
+            self.endpoint,
+        )
+    }
+}
+
+// The internals of SendMessage are okay being nulled
+#[cfg(feature = "batch")]
+NullableUnit! {SendMessage<'a,>}
+
 SimpleOutput! {
     SetReplying<'a> => ()
 }
 
+/// A symbolic reference to the response of a `SetReplying` request.
+///
+/// This type is a placeholder for the eventual response and cannot be
+/// inspected directly. It is only valid within a batch context, where it
+/// can be passed to `.then()` or `.then_nullable()` to compose dependent
+/// requests.
+///
+/// ## Notes
+/// - Not usable outside of batch building.
+/// - Cannot be read or matched against at runtime.
+/// - Opaque: only pass it to request builders.
+/// - Implements `Clone` so it can be reused across multiple dependents.
+#[derive(Clone)]
+#[cfg(feature = "batch")]
+pub struct SetReplyingResponseReference {
+    _priv: (),
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::IntoResponseReference for SetReplying<'_> {
+    type ResponseReference = SetReplyingResponseReference;
+
+    fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
+        Self::ResponseReference { _priv: () }
+    }
+}
+
 SimpleOutput! {
     SetRead<'a> => ()
+}
+
+/// A symbolic reference to the response of a `SetRead` request.
+///
+/// This type is a placeholder for the eventual response and cannot be
+/// inspected directly. It is only valid within a batch context, where it
+/// can be passed to `.then()` or `.then_nullable()` to compose dependent
+/// requests.
+///
+/// ## Notes
+/// - Not usable outside of batch building.
+/// - Cannot be read or matched against at runtime.
+/// - Opaque: only pass it to request builders.
+/// - Implements `Clone` so it can be reused across multiple dependents.
+#[derive(Clone)]
+#[cfg(feature = "batch")]
+pub struct SetReadResponseReference {
+    _priv: (),
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::IntoResponseReference for SetRead<'_> {
+    type ResponseReference = SetReadResponseReference;
+
+    fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
+        Self::ResponseReference { _priv: () }
+    }
 }
 
 /// A builder for uploading media to WhatsApp.
@@ -883,8 +1214,10 @@ SimpleOutput! {
 /// the network request until it is `.await`ed (due to its `IntoFuture` implementation)
 /// or its `execute().await` method is called.
 #[must_use = "UploadMedia does nothing unless you `.await` or `.execute().await` it"]
+#[derive(Debug)]
 pub struct UploadMedia {
-    inner: InnerUploadMedia,
+    pub(crate) request: RequestBuilder,
+    pub(crate) media: reqwest::multipart::Part,
 }
 
 impl UploadMedia {
@@ -902,9 +1235,8 @@ impl UploadMedia {
     ///
     /// [`Auth`]: crate::client::Auth
     #[inline]
-    pub fn with_auth<'a>(mut self, auth: impl ToValue<'a, Auth>) -> Self {
-        self.inner = self.inner.with_auth(&auth.to_value());
-        self
+    pub fn with_auth<'a>(self, auth: impl ToValue<'a, Auth>) -> Self {
+        <UploadMedia as crate::rest::IntoMessageRequestOutput>::with_auth(self, auth.to_value())
     }
 }
 
@@ -939,71 +1271,65 @@ IntoFuture! {
         /// ```
         #[inline]
         pub async fn execute(self) -> Result<String, Error> {
-            self.inner.execute().await
+            <UploadMedia as crate::rest::IntoMessageRequestOutput>::execute(self).await
         }
     }
 }
 
-/// A builder for deleting previously uploaded media.
+/// A symbolic reference to the response of a `UploadMedia` request.
 ///
-/// This struct is returned by [`MessageManager::delete_media`]. It does not perform
-/// the network request until it is `.await`ed (due to its `IntoFuture` implementation)
-/// or its `execute().await` method is called.
-#[must_use = "DeleteMedia does nothing unless you `.await` or `.execute().await` it"]
-pub struct DeleteMedia {
-    inner: InnerDeleteMedia,
-}
+/// This type is a placeholder for the eventual response and cannot be
+/// inspected directly. It is only valid within a batch context, where it
+/// can be passed to `.then()` or `.then_nullable()` to compose dependent
+/// requests.
+///
+/// ## Notes
+/// - Not usable outside of batch building.
+/// - Cannot be read or matched against at runtime.
+/// - Opaque: only pass it to request builders.
+/// - Implements `Clone` so it can be reused across multiple dependents.
+#[derive(Clone, Debug)]
+#[cfg(feature = "batch")]
+pub struct UploadMediaResponseReference(pub(crate) String);
 
-impl DeleteMedia {
-    /// Specifies the authentication token to use for this media deletion request.
-    ///
-    /// This is beneficial for applications managing media assets across multiple
-    /// WhatsApp Business Accounts (WBAs) or different API tokens. You can reuse
-    /// an existing `MessageManager` and apply the correct token for each deletion.
-    ///
-    /// If not called, the request will use the authentication configured with the `Client`
-    /// used to create this `MessageManager`.
-    ///
-    /// # Parameters
-    /// - `auth`: [`Auth`] token to use for this specific request.
-    ///
-    /// [`Auth`]: crate::client::Auth
-    #[inline]
-    pub fn with_auth<'a>(mut self, auth: impl ToValue<'a, Auth>) -> Self {
-        self.inner = self.inner.with_auth(auth);
-        self
+#[cfg(feature = "batch")]
+impl From<UploadMediaResponseReference> for MediaSource {
+    fn from(value: UploadMediaResponseReference) -> Self {
+        Self::Id(value.0)
     }
 }
 
-IntoFuture! {
-    impl DeleteMedia {
-        /// Executes the media deletion request.
-        ///
-        /// This method performs the network operation. Because `DeleteMedia`
-        /// implements `IntoFuture`, you can also simply `.await` the
-        /// `DeleteMedia` instance directly, which will call this method internally.
-        ///
-        /// # Returns
-        /// `Ok(())` on success.
-        /// `Err(Error)` if the request fails (e.g., media ID not found, permissions error).
-        ///
-        /// # Example
-        /// ```rust,no_run
-        /// use whatsapp_business_rs::client::MessageManager;
-        /// # async fn example_execute_delete(manager: MessageManager<'_>) -> Result<(), Box<dyn std::error::Error>> {
-        /// let media_id_to_delete = "some_old_media_id";
-        ///
-        /// // Preferred: Await directly
-        /// manager.delete_media(media_id_to_delete).await?;
-        ///
-        /// // Alternative: Call .execute().await
-        /// manager.delete_media(media_id_to_delete).execute().await?;
-        /// # Ok(()) }
-        /// ```
-        #[inline]
-        pub async fn execute(self) -> Result<(), Error> {
-            self.inner.execute().await
-        }
+#[cfg(feature = "batch")]
+NullableUnit! {UploadMedia <>}
+
+SimpleOutput! {
+    DeleteMedia => ()
+}
+
+/// A symbolic reference to the response of a `DeleteMedia` request.
+///
+/// This type is a placeholder for the eventual response and cannot be
+/// inspected directly. It is only valid within a batch context, where it
+/// can be passed to `.then()` or `.then_nullable()` to compose dependent
+/// requests.
+///
+/// ## Notes
+/// - Not usable outside of batch building.
+/// - Cannot be read or matched against at runtime.
+/// - Opaque: only pass it to request builders.
+/// - Implements `Clone` so it can be reused across multiple dependents.
+#[derive(Clone)]
+#[cfg(feature = "batch")]
+pub struct DeleteMediaResponseReference {
+    _priv: (),
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::IntoResponseReference for DeleteMedia {
+    type ResponseReference = DeleteMediaResponseReference;
+
+    fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
+        Self::ResponseReference { _priv: () }
     }
 }
 
@@ -1015,10 +1341,14 @@ pub(crate) struct InnerClient {
     endpoint: Endpoint<'static>,
 }
 
-#[derive(Clone, Debug)]
+// Endpoint with no version
+// If we could parse once
+pub(crate) const GRAPH_ENDPOINT: &str = "https://graph.facebook.com";
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Endpoint<'a, const N: usize = 0> {
     // TODO: For the data it normally contains, this is too much
-    api_version: &'static str,
+    api_version: Option<&'static str>,
     parts: [&'a str; N],
 }
 
@@ -1028,7 +1358,15 @@ impl<'a> Endpoint<'a> {
         // The onus of triming v is on us(hehe)... so we can't
         // have default endpoint as we're not const
         Self {
-            api_version: api_version.trim_matches('v'),
+            api_version: Some(api_version.trim_matches('v')),
+            parts: [],
+        }
+    }
+
+    #[cfg(feature = "batch")]
+    pub(crate) const fn without_version() -> Self {
+        Self {
+            api_version: None,
             parts: [],
         }
     }
@@ -1040,25 +1378,34 @@ impl<'a, const N: usize> Endpoint<'a, N> {
     // as a stream of char to the url parser so we can totally avoid the heap.
     // so sad..
     #[inline]
-    pub(crate) fn as_url(&self) -> String {
-        const GRAPH: usize = "https://graph.facebook.com".len();
+    pub(crate) fn as_url(&self) -> String /*Cow<'static, str>*/ {
+        const GRAPH: usize = GRAPH_ENDPOINT.len();
         const V: usize = "v".len();
         const SLASH: usize = "/".len();
 
         use std::ops::Add;
 
+        // FIXME: We could return GRAPH_ENDPOINT HERE if no version and part
+
         /* "https://graph.facebook.com" / v$api_version $(/ $path)+ */
         let size = GRAPH
-            + SLASH
-            + (V + self.api_version.len())
+            + if let Some(version) = self.api_version {
+                SLASH
+                + (V + version.len())
+            } else {
+                0
+            }
             // We have / before the first also
             + self.parts.iter().map(|part| part.len()).fold(SLASH * N, usize::add);
 
         let mut url = String::with_capacity(size);
 
         /* "https://graph.facebook.com" / v$api_version $(/ $path)+ */
-        url.push_str("https://graph.facebook.com/v");
-        url.push_str(self.api_version);
+        url.push_str(GRAPH_ENDPOINT);
+        if let Some(version) = self.api_version {
+            url.push_str("/v");
+            url.push_str(version);
+        }
         self.parts.iter().for_each(|part| {
             url.push('/');
             url.push_str(part)
@@ -1093,7 +1440,7 @@ decl_endpoint! {1 => 2}
 impl Client {
     #[inline(always)]
     pub(crate) fn endpoint(&self) -> Endpoint<'static, 0> {
-        self.inner.endpoint.clone()
+        self.inner.endpoint
     }
 
     #[inline(always)]
@@ -1104,23 +1451,23 @@ impl Client {
     // TODO: Since we don't benefit from going to String, we can just reuse this endpoint
     // in our error message instead of stealing like cavemen
     //
-    // TOD: Use raw Endpoint
+    // TODO: Use raw Endpoint
     #[inline]
     pub(crate) fn post<'a, const N: usize>(&self, url: Endpoint<'a, N>) -> RequestBuilder {
         let url = url.as_url();
-        self.inner.http_client.post(&url)
+        self.inner.http_client.post(url)
     }
 
     #[inline]
     pub(crate) fn get<'a, const N: usize>(&self, url: Endpoint<'a, N>) -> RequestBuilder {
         let url = url.as_url();
-        self.inner.http_client.get(&url)
+        self.inner.http_client.get(url)
     }
 
     #[inline]
     pub(crate) fn delete<'a, const N: usize>(&self, url: Endpoint<'a, N>) -> RequestBuilder {
         let url = url.as_url();
-        self.inner.http_client.delete(&url)
+        self.inner.http_client.delete(url)
     }
 
     #[inline]
@@ -1150,6 +1497,65 @@ impl Display for Auth {
         match &self {
             Auth::Token(token) => f.write_str(&token.0),
             Auth::Secret { app_id, app_secret } => write!(f, "{app_id}|{app_secret}"),
+            Auth::Parsed(parsed_auth) => parsed_auth
+                .header
+                .to_str()
+                .map_err(|_| std::fmt::Error)
+                .and_then(|s| {
+                    if let Some(auth) = s.strip_prefix("Bearer ") {
+                        f.write_str(auth)
+                    } else {
+                        Ok(())
+                    }
+                }),
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("{inner}")]
+pub struct AuthParsedError {
+    inner: reqwest::header::InvalidHeaderValue,
+}
+
+impl From<reqwest::header::InvalidHeaderValue> for Error {
+    fn from(value: reqwest::header::InvalidHeaderValue) -> Self {
+        Error::internal(value.into())
+    }
+}
+
+impl TryFrom<Auth> for reqwest::header::HeaderValue {
+    type Error = reqwest::header::InvalidHeaderValue;
+
+    fn try_from(value: Auth) -> Result<Self, Self::Error> {
+        match value {
+            Auth::Token { .. } | Auth::Secret { .. } => {
+                format!("Bearer {value}")
+                    .try_into()
+                    .map(|mut h: HeaderValue| {
+                        h.set_sensitive(true);
+                        h
+                    })
+            }
+            Auth::Parsed(parsed) => Ok(parsed.header),
+        }
+    }
+}
+
+impl TryFrom<&Auth> for reqwest::header::HeaderValue {
+    type Error = reqwest::header::InvalidHeaderValue;
+
+    fn try_from(value: &Auth) -> Result<Self, Self::Error> {
+        match value {
+            Auth::Token { .. } | Auth::Secret { .. } => {
+                format!("Bearer {value}")
+                    .try_into()
+                    .map(|mut h: HeaderValue| {
+                        h.set_sensitive(true);
+                        h
+                    })
+            }
+            Auth::Parsed(parsed) => Ok(parsed.header.clone()),
         }
     }
 }

@@ -23,7 +23,7 @@ pub enum Error {
     ///
     /// This variant wraps a `BoxError` (a boxed `dyn std::error::Error + Send + Sync`)
     /// to handle underlying network client errors, typically from `reqwest`.
-    #[error("Network error: {0}")]
+    #[error("A network error occurred: {0}")]
     Network(#[from] BoxError),
 
     /// Represents an error specifically related to the WhatsApp Business API service
@@ -32,12 +32,12 @@ pub enum Error {
     /// This variant wraps a `ServiceError` which further categorizes issues like
     /// API-specific errors or parsing failures. It is distinct from `MetaError`,
     /// which describes errors *reported by Meta itself in an API response body*.
-    #[error("API service or processing error: {0}")]
+    #[error("An API service or data processing error occurred: {0}")]
     Service(#[from] ServiceError),
 
     /// Represents an **I/O error** that occurred during IO operations,
     /// such as downloading media to disk.
-    #[error("I/0 error: {0}")]
+    #[error("An I/O error occurred: {0}")]
     Io(#[from] std::io::Error),
 
     /// Represents an **internal logic error** within the `whatsapp-business-rs` crate,
@@ -47,7 +47,7 @@ pub enum Error {
     ///
     /// These errors typically indicate a bug in the library itself or misuse of the API
     /// that isn't handled gracefully by other error variants.
-    #[error("Internal crate error: {0}")]
+    #[error("An internal library error occurred: {0}")]
     Internal(BoxError),
 }
 
@@ -65,12 +65,14 @@ impl Error {
 /// This struct provides context such as the HTTP status code, the affected endpoint,
 /// and a more specific error kind.
 #[derive(thiserror::Error, Debug)]
-#[error("Service Error: Status {status}, Endpoint: {endpoint:?}. Kind: {kind}")]
+#[error("Service error at endpoint '{endpoint:?}': {kind} (HTTP status {status})")]
 #[non_exhaustive]
 pub struct ServiceError {
     pub(crate) status: StatusCode,
-    pub(crate) endpoint: Option<String>,
     pub(crate) kind: ServiceErrorKind,
+    #[cfg(debug_assertions)]
+    pub(crate) endpoint: Option<String>,
+    // TODO: Include method
 }
 
 impl ServiceError {
@@ -81,7 +83,15 @@ impl ServiceError {
 
     /// Returns the API endpoint (if known) where this service error occurred.
     pub fn endpoint(&self) -> Option<&str> {
-        self.endpoint.as_deref()
+        #[cfg(debug_assertions)]
+        {
+            self.endpoint.as_deref()
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
     }
 
     /// Returns the specific kind of service error.
@@ -118,7 +128,7 @@ pub enum ServiceErrorKind {
     ///
     /// This variant wraps an `ApiError` which contains the HTTP status code and
     /// [`MetaError`] details directly from the API response.
-    #[error("API-returned error: {0}")]
+    #[error("The API returned an error: {0}")]
     Api(#[from] ApiError),
 
     /// Represents an error occurring during the **parsing or deserialization of API responses**
@@ -126,7 +136,7 @@ pub enum ServiceErrorKind {
     ///
     /// This variant wraps a `ParseError` which includes the original body that failed
     /// to parse and a source error.
-    #[error("Failed to parse API response or webhook payload: {0}")]
+    #[error("Failed to parse the API response or webhook payload: {0}")]
     Parse(#[from] ParseError),
 
     /// Indicates that a **webhook payload or API response contains invalid or unexpected data**
@@ -135,16 +145,21 @@ pub enum ServiceErrorKind {
     /// This suggests a mismatch between the expected data format and what was
     /// actually received, possibly due to API changes or malformed input.
     /// It includes an optional `BoxError` source for debugging.
-    #[error("Invalid or unexpected payload structure in webhook or API response")]
+    #[error("The webhook or API response had an invalid or unexpected payload structure.")]
     InvalidPayload(#[source] Option<BoxError>),
 }
 
 impl ServiceErrorKind {
-    pub(crate) fn service(self, endpoint: impl Into<String>, status: StatusCode) -> ServiceError {
+    pub(crate) fn service(
+        self,
+        #[cfg(debug_assertions)] endpoint: impl Into<String>,
+        status: StatusCode,
+    ) -> ServiceError {
         ServiceError {
-            endpoint: Some(endpoint.into()),
             status,
             kind: self,
+            #[cfg(debug_assertions)]
+            endpoint: Some(endpoint.into()),
         }
     }
 }
@@ -157,7 +172,7 @@ impl ServiceErrorKind {
 /// # Fields
 /// - `error`: A boxed [`MetaError`] containing the detailed error information from Meta.
 #[derive(thiserror::Error, Debug)]
-#[error("Meta API error: {error:#?}")]
+#[error("Meta API error: {error}")]
 #[non_exhaustive]
 pub struct ApiError {
     pub error: Box<MetaError>,
@@ -171,11 +186,11 @@ pub struct ApiError {
 ///
 /// # Fields
 /// - `source`: An optional `BoxError` representing the underlying cause of the
-///   parsing failure (e.g., a `serde_json::Error` or `simd_json::Error`).
+///   parsing failure (e.g., a `serde_json::Error`).
 /// - `body`: The original raw `String` content that could not be parsed,
 ///   useful for debugging.
 #[derive(thiserror::Error, Debug)]
-#[error("Failed to parse response body. Original body: '{}'.", body)]
+#[error("Failed to parse the response body. Raw body content was: '{}'.", body)]
 #[non_exhaustive]
 pub struct ParseError {
     #[source]

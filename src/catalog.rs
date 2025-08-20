@@ -65,8 +65,10 @@
 //! [`ProductData`]: crate::catalog::ProductData
 
 use crate::{
-    rest::BuilderInto, to_value, waba::Catalog, Builder, CatalogRef, Endpoint, SimpleOutput,
-    SimpleStreamOutput, ToValue, Update,
+    rest::{client::CreateProductResponse, BuilderInto},
+    to_value,
+    waba::Catalog,
+    Builder, CatalogRef, Endpoint, SimpleOutput, SimpleStreamOutput, ToValue, Update,
 };
 use std::{borrow::Cow, ops::Deref};
 
@@ -348,6 +350,32 @@ impl ListProduct {
 
 SimpleOutput! {
     CreateProduct => ProductCreate
+}
+
+/// A symbolic reference to the response of a `CreateProduct` request.
+///
+/// This type can be used directly in other requests that expect a
+/// `MetaProductRef`. This enables you to compose dependent requests
+/// within a batch without needing the concrete ID or field value upfront.
+///
+/// ## Notes
+/// - Still only valid inside a batch context.
+/// - Should not be inspected at runtime (no field access).
+/// - Implements `Clone` so it can be reused in multiple dependents.
+/// - Implements [`ToValue`] so it can stand in for `MetaProductRef`.
+#[derive(Clone)]
+#[cfg(feature = "batch")]
+pub struct CreateProductResponseReference {
+    reference_id: Cow<'static, str>,
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::IntoResponseReference for CreateProduct {
+    type ResponseReference = CreateProductResponseReference;
+
+    fn into_response_reference(reference_id: Cow<'static, str>) -> Self::ResponseReference {
+        Self::ResponseReference { reference_id }
+    }
 }
 
 /// Represents a product listed in a WhatsApp Business catalog.
@@ -669,6 +697,24 @@ impl ToValue<'_, MetaProductRef> for ProductCreate {
     #[inline]
     fn to_value(self) -> Cow<'static, MetaProductRef> {
         Cow::Owned(self.product)
+    }
+}
+
+impl<'m> ToValue<'m, MetaProductRef> for &'m CreateProductResponseReference {
+    #[inline]
+    fn to_value(self) -> Cow<'static, MetaProductRef> {
+        let id = &self.reference_id;
+        let ref_id = crate::reference!(id => CreateProductResponse => [product] [product_id]);
+        Cow::Owned(MetaProductRef { product_id: ref_id })
+    }
+}
+
+impl ToValue<'_, MetaProductRef> for CreateProductResponseReference {
+    #[inline]
+    fn to_value(self) -> Cow<'static, MetaProductRef> {
+        let id = self.reference_id;
+        let ref_id = crate::reference!(id => CreateProductResponse => [product] [product_id]);
+        Cow::Owned(MetaProductRef { product_id: ref_id })
     }
 }
 

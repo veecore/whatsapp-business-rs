@@ -101,6 +101,7 @@ use crate::rest::client::{
     serialize_ordinary_text, serialize_str, serialize_text_text, serialize_text_text_opt,
     DownloadMedia as InnerDownloadMedia, DownloadMediaUrl,
 };
+use crate::rest::option_from_response_default;
 use crate::{catalog::ProductRef, client::Client, error::Error, Identity, IdentityRef};
 use crate::{
     derive, enum_traits, AnyField, CatalogRef, ContentTraits, DeserializeAdjacent, FromResponse,
@@ -109,6 +110,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::ops::Deref;
+#[allow(unused_imports)]
 use std::path::Path;
 use tokio::io::AsyncWrite;
 
@@ -222,6 +224,7 @@ impl Content {
     /// }
     /// # }
     /// ```
+    #[must_use]
     pub fn download_media<'dst, Dst>(
         &self,
         dst: &'dst mut Dst,
@@ -447,6 +450,29 @@ impl Media {
         Self::new(media_source, MediaType::Image(ImageExtension::Jpeg))
     }
 
+    /// Creates a new `Media` instance specifically for a PNG image.
+    ///
+    /// This is a convenience constructor that sets the `media_type` to `image/png` automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `media_source` - The source of the JPEG image (bytes, URL, or WhatsApp ID).
+    ///   Accepts anything convertible into a [`MediaSource`] enum variant.
+    ///
+    /// # Returns
+    ///
+    /// A new `Media` instance configured for a JPEG image.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::message::Media;
+    ///
+    /// let jpeg_image = Media::png("11133444488849");
+    /// ```
+    pub fn png(media_source: impl Into<MediaSource>) -> Self {
+        Self::new(media_source, MediaType::Image(ImageExtension::Png))
+    }
+
     /// Creates a new `Media` instance specifically for a WebP sticker.
     ///
     /// This is a convenience constructor that sets the `media_type` to `image/webp` automatically.
@@ -518,6 +544,7 @@ impl Media {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg(feature = "media_ext")]
     pub async fn from_path(path: impl AsRef<Path> + Send) -> Result<Self, MediaFromPathError> {
         let path_ref = path.as_ref();
         let data = tokio::fs::read(path_ref)
@@ -556,6 +583,7 @@ impl Media {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg(feature = "media_ext")]
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, MediaInferError> {
         let mime_type = infer::get(&data)
             .map(|kind| kind.mime_type())
@@ -690,6 +718,15 @@ impl Media {
     /// ```
     pub fn is_video(&self) -> bool {
         matches!(self.media_type, MediaType::Video(_))
+    }
+
+    pub fn into_upload_parts(self) -> Option<(Vec<u8>, MediaType, Cow<'static, str>)> {
+        match self.media_source {
+            MediaSource::Bytes(bytes) => {
+                Some((bytes, self.media_type, Self::default_filename().into()))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -965,13 +1002,13 @@ pub enum MediaType {
 
 impl MediaType {
     /// Returns the standard MIME type string for the given media type and extension.
-    pub(crate) fn mime_type(self) -> &'static str {
+    pub fn mime_type(self) -> Cow<'static, str> {
         match self {
-            MediaType::Audio(ext) => ext.mime_type(),
-            MediaType::Document(ext) => ext.mime_type(),
-            MediaType::Image(ext) => ext.mime_type(),
-            MediaType::Sticker(ext) => ext.mime_type(),
-            MediaType::Video(ext) => ext.mime_type(),
+            MediaType::Audio(ext) => ext.mime_type().into(),
+            MediaType::Document(ext) => ext.mime_type().into(),
+            MediaType::Image(ext) => ext.mime_type().into(),
+            MediaType::Sticker(ext) => ext.mime_type().into(),
+            MediaType::Video(ext) => ext.mime_type().into(),
         }
     }
 }
@@ -1198,9 +1235,9 @@ impl From<Media> for InteractiveHeaderMedia {
 }
 
 impl InteractiveHeaderMedia {
-    pub fn new(media_source: MediaSource, media_type: MediaType) -> Self {
+    pub fn new(media_source: impl Into<MediaSource>, media_type: MediaType) -> Self {
         Self {
-            media_source,
+            media_source: media_source.into(),
             media_type,
         }
     }
@@ -1249,7 +1286,7 @@ derive! {
         /// Optional header content
         #![serde(
             skip_serializing_if = "Option::is_none",
-            default
+            default = "option_from_response_default::<InteractiveHeader>"
         )]
         pub header: Option<InteractiveHeader>,
 
@@ -1261,7 +1298,7 @@ derive! {
         #![serde(
             skip_serializing_if = "Option::is_none",
             serialize_with = "serialize_text_text_opt",
-            default
+            default = "option_from_response_default::<Text>"
         )]
         pub footer: Option<Text>,
     }

@@ -602,6 +602,33 @@ SimpleOutput! {
     ConfigureWebhook<'a> => ()
 }
 
+/// A symbolic reference to the response of a `ConfigureWebhook` request.
+///
+/// This type is a placeholder for the eventual response and cannot be
+/// inspected directly. It is only valid within a batch context, where it
+/// can be passed to `.then()` or `.then_nullable()` to compose dependent
+/// requests.
+///
+/// ## Notes
+/// - Not usable outside of batch building.
+/// - Cannot be read or matched against at runtime.
+/// - Opaque: only pass it to request builders.
+/// - Implements `Clone` so it can be reused across multiple dependents.
+#[derive(Clone)]
+#[cfg(feature = "batch")]
+pub struct ConfigureWebhookResponseReference {
+    _priv: (),
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::IntoResponseReference for ConfigureWebhook<'_> {
+    type ResponseReference = ConfigureWebhookResponseReference;
+
+    fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
+        Self::ResponseReference { _priv: () }
+    }
+}
+
 impl<'a> ConfigureWebhook<'a> {
     /// Specifies the webhook events to subscribe to.
     ///

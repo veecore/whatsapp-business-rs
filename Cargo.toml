@@ -3,7 +3,7 @@ name = "whatsapp-business-rs"
 version = "0.1.1"
 edition = "2021"
 authors = ["Victor <victorayo206@example.com>"]
-description = "A modern Rust SDK for the WhatsApp Business Platform — send messages, manage catalogs, integrate webhooks, and build automated business flows with type safety and async elegance."
+description = "Type-safe Rust SDK for WhatsApp Business — with batch requests and response linking."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/veecore/whatsapp-business-rs"
 documentation = "https://docs.rs/whatsapp-business-rs"
@@ -15,21 +15,30 @@ build = "build.rs"
 exclude = [".github", "assets"]
 
 [dependencies]
-reqwest = { version = "0.11", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0.12"
 async-stream = "0.3.6"
-axum = "0.8.4"
-hmac = "0.12.1"
-sha2 = "0.10.9"
-hex = "0.4.3"
 futures = "0.3.31"
-subtle = "2.6.1"
 paste = "1.0.15"
-infer = {version = "0.19.0", default-features = false}
 base64 = "0.22.1"
 
+# --- Optional dependencies for the `server` feature ---
+axum = {version = "0.8.4", optional = true}
+hmac = {version = "0.12.1", optional = true}
+sha2 = {version = "0.10.9", optional = true}
+hex = {version = "0.4.3", optional = true}
+subtle = {version = "2.6.1", optional = true}
+
+# --- Optional dependencies for the `server` feature ---
+infer = {version = "0.19.0", default-features = false, optional = true}
+percent-encoding = {version = "2.3.1", default-features = false, optional = true}
+
 [features]
+default = ["batch", "server", "media_ext"]
 incoming_message_ext = []
+batch = ["percent-encoding"]
+server = ["axum", "hmac", "sha2", "hex", "subtle"]
+media_ext = ["infer"]

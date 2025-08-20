@@ -1,5 +1,20 @@
 #[macro_export]
 #[doc(hidden)]
+// This exists because we can't implement TryFrom<HV> for Cow<'_, Auth>
+macro_rules! add_auth_to_request {
+    ($auth:expr => $request:expr) => {
+        // This match only profits parsed auth - a bit
+        match $auth {
+            std::borrow::Cow::Owned(auth) => $request.header(reqwest::header::AUTHORIZATION, auth),
+            std::borrow::Cow::Borrowed(auth) => {
+                $request.header(reqwest::header::AUTHORIZATION, auth)
+            }
+        }
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
 macro_rules! Endpoint {
     ($($node:tt)*) => {
         #[inline(always)]
@@ -50,25 +65,30 @@ macro_rules! IntoFuture {
         $([where $($wheres:tt)*])?
         {
             $(#[$meta:meta])*
-            pub async fn $func:ident ( $($args:tt)* ) -> $ret:ty $body:block
+            pub
+            $(async fn $func:ident ( $($args:tt)* ) -> $ret:ty $body:block)?
+
+            $(fn $func_:ident ( $($args_:tt)* ) -> impl Future<Output = $ret_:ty> $body_:block)?
         }
     ) => {
         impl $(<$($lt,)? $($gen),*>)? $name $(<$($lt2,)? $($gen2),*>)?
         $(where $($wheres)*)?
         {
             $(#[$meta])*
-            pub async fn $func($($args)*) -> $ret $body
+            pub
+            $(async fn $func($($args)*) -> $ret $body)?
+            $(fn $func_($($args_)*) -> impl ::std::future::Future<Output = $ret_> $body_)?
         }
 
         #[cfg(nightly_rust)]
         impl $(<$($lt,)? $($gen),*>)? ::std::future::IntoFuture for $name $(<$($lt2,)? $($gen2),*>)?
         $(where $($wheres)*)?
         {
-            type Output = $ret;
-            type IntoFuture = impl ::std::future::Future<Output = $ret>;
+            type Output = $($ret)? $($ret_)?;
+            type IntoFuture = impl ::std::future::Future<Output = Self::Output>;
 
             fn into_future(self) -> Self::IntoFuture {
-                self.$func()
+                self. $($func())? $($func_())?
             }
         }
 
@@ -76,11 +96,81 @@ macro_rules! IntoFuture {
         impl $(<$($lt,)? $($gen),*>)? ::std::future::IntoFuture for $name $(<$($lt2,)? $($gen2),*>)?
         $(where $($wheres)*)?
         {
-            type Output = $ret;
-            type IntoFuture = ::std::pin::Pin<Box<dyn ::std::future::Future<Output = $ret> + Send $($(+ $lt)?)?>>;
+            type Output = $($ret)? $($ret_)?;
+            type IntoFuture = ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Self::Output> + Send $($(+ $lt)?)?>>;
 
             fn into_future(self) -> Self::IntoFuture {
-                Box::pin(self.$func())
+                Box::pin(self. $($func())? $($func_())?)
+            }
+        }
+    };
+}
+
+// NOTE: This is only for requests sending no body or json object body
+// and we assume a request method on the struct
+#[macro_export]
+#[doc(hidden)]
+macro_rules! SimpleOutputBatch {
+    ($name:ident <$($life:lifetime,)? $([$g:ty: $($b:tt)*]),*> => $out:ty) => {
+        paste::paste!{
+            impl<$($life,)? $($g: $($b)*),*> $crate::batch::Requests for $name <$($life,)? $($g),*> {
+                type BatchHandler = [<$name Handler>] <$($g),*>;
+
+                type ResponseReference =
+                    <Self as $crate::batch::IntoResponseReference>::ResponseReference;
+
+                fn into_batch_ref(
+                    self,
+                    f: &mut $crate::batch::Formatter,
+                ) -> Result<(Self::BatchHandler, Self::ResponseReference), $crate::batch::FormatError> {
+                    let mut request = f.add_request(self.request())?;
+                    let name = request.get_name();
+                    let response_reference =
+                        <Self as $crate::batch::IntoResponseReference>::into_response_reference(name);
+
+                    let _debug = request.finish()?;
+                    let handler = [<$name Handler>] {
+                        #[cfg(debug_assertions)]
+                        endpoint: _debug.url.into(),
+                        $(
+                            [<_marker _ $g:lower>]: std::marker::PhantomData
+                        ),*
+                    };
+
+                    Ok((handler, response_reference))
+                }
+
+                fn into_batch(self, f: &mut $crate::batch::Formatter) -> Result<Self::BatchHandler, $crate::batch::FormatError> {
+                    let _debug = f.add_request(self.request())?.finish()?;
+                    Ok([<$name Handler>] {
+                        #[cfg(debug_assertions)]
+                        endpoint: _debug.url.into(),
+                        $(
+                            [<_marker _ $g:lower>]: std::marker::PhantomData
+                        ),*
+                    })
+                }
+
+                $crate::requests_batch_include! {}
+            }
+
+            $crate::NullableUnit! {$name <$($life,)? $([$g: $($b)*]),*>}
+
+            // A type that represents a single request handler from an external `reqwest::RequestBuilder`.
+            pub struct [<$name Handler>] <$($g),*> {
+                #[cfg(debug_assertions)]
+                endpoint: Cow<'static, str>,
+                $(
+                    [<_marker _ $g:lower>]: std::marker::PhantomData<$g>
+                ),*
+            }
+
+            impl<$($g: $($b)*),*> $crate::batch::Handler for [<$name Handler>] <$($g),*> {
+                type Responses = Result<$out, $crate::Error>;
+
+                fn from_batch(self, response: &mut $crate::batch::BatchResponse) -> Result<Self::Responses, $crate::batch::FromResponseError> {
+                    response.handle_next_typical(#[cfg(debug_assertions)] self.endpoint)
+                }
             }
         }
     };
@@ -98,7 +188,7 @@ macro_rules! SimpleStreamOutput {
         /// The network request is performed when the generated stream is iterated over.
         $(#[$cont_attr])*
         pub struct $name {
-            request: reqwest::RequestBuilder,
+            pub(crate) request: reqwest::RequestBuilder,
         }
 
         impl $name {
@@ -143,6 +233,31 @@ macro_rules! SimpleStreamOutput {
                     $crate::rest::stream_net_op(self.request)
                 }
             }
+
+            // // CONSIDER RENAMING
+            // // TODOC: Get this page and the next page... if this call fails.. self is not returned back
+            // pub async fn next_page(self) -> Result<(impl Iterator<Item = $stream>, Self), $crate::error::Error> {
+            //     $crate::rest::Pager {
+            //         request: self.request,
+            //         item: std::marker::PhantomData,
+            //     }.next_page().await.map(|(p, n)| {
+            //         (p, Self {request: n})
+            //     })
+            // }
+
+            // $crate::IntoFuture! {
+            //     impl$(<$life>)? $name$(<$life>)? {
+            //         /// Executes the API request and returns the current page.
+            //         #[inline]
+            //         pub async fn execute(self) -> Result<impl Iterator<Item = $stream>, $crate::error::Error> {
+            //             $crate::rest::fut_net_op(self.request).await
+            //         }
+            //     }
+            // }
+
+            // $crate::SimpleOutputBatch! {
+            //     $name => Vec<$execute> // No we may have to expose Page.... let's rethink
+            // }
         }
     }
 }
@@ -151,42 +266,42 @@ macro_rules! SimpleStreamOutput {
 #[doc(hidden)]
 macro_rules! SimpleOutput {
     ($(#[$cont_attr:meta])* $name:ident $(<$life:lifetime>)? => $execute:ty) => {
+        $(#[$cont_attr])*
+        /// This struct represents a pending API request.
+        ///
+        /// It provides methods to configure the request before executing it.
+        ///
+        /// It does not perform any network operations until it is `.await`ed
+        /// (due to its `IntoFuture` implementation) or its `execute().await` method is called.
+        #[must_use = concat!(stringify!($name), " does nothing unless you `.await` or `.execute().await` it")]
+        pub struct $name $(<$life>)? {
+            pub(crate) request: reqwest::RequestBuilder,
+            $(_marker: std::marker::PhantomData<&$life ()>)?
+        }
+
+        impl$(<$life>)? $name$(<$life>)? {
+            /// Specifies the authentication token to use for this API request.
+            ///
+            /// This is particularly useful for applications managing multiple WhatsApp Business Accounts (WBAs)
+            /// where different API tokens might be required for various operations.
+            /// It allows you to reuse a manager instance and apply the appropriate token
+            /// for each specific request without re-initializing the `Client`.
+            ///
+            /// If not called, the request will use the authentication configured with the `Client`
+            /// that initiated this operation.
+            ///
+            /// # Parameters
+            /// - `auth`: [`Auth`] to use for this specific request.
+            ///
+            /// [`Auth`]: crate::client::Auth
+            #[inline]
+            pub fn with_auth<'with_auth>(mut self, auth: impl $crate::ToValue<'with_auth, $crate::client::Auth>) -> Self {
+                self.request = $crate::add_auth_to_request!(auth.to_value() => self.request);
+                self
+            }
+        }
+
         paste::paste! {
-            $(#[$cont_attr])*
-            /// This struct represents a pending API request.
-            ///
-            /// It provides methods to configure the request before executing it.
-            ///
-            /// It does not perform any network operations until it is `.await`ed
-            /// (due to its `IntoFuture` implementation) or its `execute().await` method is called.
-            #[must_use = "" $name " does nothing unless you `.await` or `.execute().await` it"]
-            pub struct $name $(<$life>)? {
-                request: reqwest::RequestBuilder,
-                $(_marker: std::marker::PhantomData<&$life ()>)?
-            }
-
-            impl$(<$life>)? $name$(<$life>)? {
-                /// Specifies the authentication token to use for this API request.
-                ///
-                /// This is particularly useful for applications managing multiple WhatsApp Business Accounts (WBAs)
-                /// where different API tokens might be required for various operations.
-                /// It allows you to reuse a manager instance and apply the appropriate token
-                /// for each specific request without re-initializing the `Client`.
-                ///
-                /// If not called, the request will use the authentication configured with the `Client`
-                /// that initiated this operation.
-                ///
-                /// # Parameters
-                /// - `auth`: [`Auth`] to use for this specific request.
-                ///
-                /// [`Auth`]: crate::client::Auth
-                #[inline]
-                pub fn with_auth<'with_auth>(mut self, auth: impl $crate::ToValue<'with_auth, $crate::client::Auth>) -> Self {
-                    self.request = self.request.bearer_auth(auth.to_value());
-                    self
-                }
-            }
-
             $crate::IntoFuture! {
                 impl$(<$life>)? $name$(<$life>)? {
                     /// Executes the API request and returns the result.
@@ -213,6 +328,18 @@ macro_rules! SimpleOutput {
                     }
                 }
             }
+        }
+
+        impl$(<$life>)? $name$(<$life>)? {
+            #[inline(always)]
+            pub(crate) fn request(self) -> reqwest::RequestBuilder {
+                self.request
+            }
+        }
+
+        #[cfg(feature = "batch")]
+        $crate::SimpleOutputBatch! {
+            $name <$($life,)?> => $execute
         }
     }
 }
@@ -426,24 +553,22 @@ macro_rules! FieldsTrait {
             |Variant_Type|: ,
         )*
     } => {
-        paste::paste!(
-            impl $crate::rest::FieldsTrait for $name {
-                const ALL: &'static [Self] = &[
-                    $(
-                        Self::$variant,
-                    )*
-                ];
+        impl $crate::rest::FieldsTrait for $name {
+            const ALL: &'static [Self] = &[
+                $(
+                    Self::$variant,
+                )*
+            ];
 
-                #[inline]
-                fn as_snake_case(&self) -> &'static str {
-                    match self {
-                        $(
-                            Self::$variant => stringify!([<$variant:snake>]),
-                        )*
-                    }
+            #[inline]
+            fn as_snake_case(&self) -> &'static str {
+                match self {
+                    $(
+                        Self::$variant => paste::paste!{stringify!([<$variant:snake>])},
+                    )*
                 }
             }
-        );
+        }
     }
 }
 
@@ -699,8 +824,6 @@ macro_rules! ContentTraits {
     ) => {
         paste::paste!(
             impl $crate::rest::IntoMessageRequest for $name {
-                type Request = [<$name Request>];
-
                 type Output = [<$name Output>];
 
                 #[inline]
@@ -740,7 +863,7 @@ macro_rules! ContentTraits {
                 type Request = [<$name Request>];
 
                 #[inline]
-                fn with_auth(self, auth: &$crate::client::Auth) -> Self {
+                fn with_auth(self, auth: std::borrow::Cow<'_, $crate::client::Auth>) -> Self {
                     match self {
                         $(
                             Self::$media_type(media) => Self::$media_type(media.with_auth(auth)),
@@ -773,22 +896,97 @@ macro_rules! ContentTraits {
                 #[allow(dead_code)]
                 pub(crate) enum [<$name Request>] {
                     $(
-                        $media_type(<$media_ty as $crate::rest::IntoMessageRequest>::Request),
+                        $media_type(<<$media_ty as $crate::rest::IntoMessageRequest>::Output as $crate::rest::IntoMessageRequestOutput>::Request),
                     )+
 
                     $(
                         $(#![$variant_attr])*
-                        $variant $((<$data as $crate::rest::IntoMessageRequest>::Request))?,
+                        $variant $((<<$data as $crate::rest::IntoMessageRequest>::Output as $crate::rest::IntoMessageRequestOutput>::Request))?,
                     )*
                 }
             }
 
-            impl $crate::rest::FromResponse for $name {
-                type Response<'a> = [<$name Response>]<'a>;
+            #[cfg(feature = "batch")]
+            impl $crate::batch::Requests for [<$name Output>] {
+                type BatchHandler = [<$name Handler>];
+
+                type ResponseReference = <Self as $crate::rest::IntoMessageRequestOutput>::Request;
+
+                fn into_batch_ref(
+                    self,
+                    f: &mut $crate::batch::Formatter,
+                ) -> Result<(Self::BatchHandler, Self::ResponseReference), $crate::batch::FormatError> {
+                    Ok(match self {
+                        $(
+                            Self::$media_type(media) => {
+                                let (h, r) = media.into_batch_ref(f)?;
+                                (Self::BatchHandler::$media_type(h), Self::ResponseReference::$media_type(r))
+                            },
+                        )*
+                        $(
+                            Self::$variant $(([<$data:snake>]))? => {
+                                let (h, r) = $([<$data:snake>].into_batch_ref(f)?)?; // FIXME: None is empty for now
+                                (Self::BatchHandler::$variant(h), Self::ResponseReference::$variant(r))
+                            }
+                        )*
+                    })
+                }
+
+                fn size_hint(&self) -> (usize, Option<usize>) {
+                    match self {
+                        $(
+                            Self::$media_type(media) => media.size_hint(),
+                        )*
+                        $(
+                            Self::$variant $(([<$data:snake>]))? => $([<$data:snake>].size_hint())?,
+                        )*
+                    }
+                }
+
+                $crate::requests_batch_include! {}
+            }
+
+            #[cfg(feature = "batch")]
+            pub(crate) enum [<$name Handler>] {
+                $(
+                    $media_type(<<$media_ty as $crate::rest::IntoMessageRequest>::Output as $crate::batch::Requests>::BatchHandler),
+                )+
+                 $(
+                    $variant$((<<$data as $crate::rest::IntoMessageRequest>::Output as $crate::batch::Requests>::BatchHandler))?,
+                )*
+            }
+
+            #[cfg(feature = "batch")]
+            impl $crate::batch::Handler for [<$name Handler>] {
+                // We don't need the response... mm stressed
+                type Responses = ();
+
+                fn from_batch(self, response: &mut $crate::batch::BatchResponse)
+                    -> Result<Self::Responses, $crate::batch::FromResponseError> {
+                     match self {
+                        $(
+                            Self::$media_type(media_res) => {
+                                let _ = media_res.from_batch(response)?;
+                                Ok(())
+                            },
+                        )+
+
+                        $(
+                            Self::$variant(v) => {
+                                let _ = v.from_batch(response)?;
+                                Ok(())
+                            },
+                        )*
+                     }
+                }
+            }
+
+            impl<'from_response> $crate::rest::FromResponse<'from_response> for $name {
+                type Response = [<$name Response>]<'from_response>;
 
                 // TODO: Handle auto-download
                 #[inline]
-                fn from_response<'a>(response: Self::Response<'a>) -> Result<Self, $crate::error::ServiceErrorKind> {
+                fn from_response(response: Self::Response) -> Result<Self, $crate::error::ServiceErrorKind> {
                     match response {
                         $(
                             Self::Response::$media_type(media_res) => {
@@ -808,16 +1006,16 @@ macro_rules! ContentTraits {
             // practically thesame as the request counterpart
             $crate::derive! {
                 #[derive(Debug, #$crate::DeserializeAdjacent)]
-                #![serde(bound(deserialize = "'de: 'a, 'a: 'de"))]
+                #![serde(bound(deserialize = "'de: 'from_response"))]
                 #[allow(dead_code)]
-                pub(crate) enum [<$name Response>]<'a> {
+                pub(crate) enum [<$name Response>]<'from_response> {
                     $(
-                        $media_type(<$media_ty as $crate::rest::FromResponse>::Response<'a>),
+                        $media_type(<$media_ty as $crate::rest::FromResponse<'from_response>>::Response),
                     )+
 
                     $(
                         $(#![$variant_attr])*
-                        $variant $((<$data as $crate::rest::FromResponse>::Response<'a>))?,
+                        $variant $((<$data as $crate::rest::FromResponse<'from_response>>::Response))?,
                     )*
                 }
             }
@@ -1053,15 +1251,15 @@ macro_rules! FromResponse {
         )*
     } => {
         paste::paste!(
-            impl<$($($life,)* $($generic,)*)?> $crate::rest::FromResponse for $name $(<$($life),* $($generic),*>)?
+            impl<'from_response, $($($life,)* $($generic,)*)?> $crate::rest::FromResponse<'from_response> for $name $(<$($life),* $($generic),*>)?
             where
-                $($ty: $crate::rest::FromResponse,)*
+                $($ty: $crate::rest::FromResponse<'from_response>,)*
             {
-                type Response<'a> = [<$name Response>]<'a, $($($generic),*)?>;
+                type Response = [<$name Response>]<'from_response, $($($generic),*)?>;
 
                 #[inline]
-                fn from_response<'a>(
-                    response: Self::Response<'a>,
+                fn from_response(
+                    response: Self::Response,
                 ) -> Result<Self, $crate::error::ServiceErrorKind> {
                     Ok(Self {
                         $(
@@ -1073,22 +1271,22 @@ macro_rules! FromResponse {
 
             #[derive(::serde::Deserialize)]
             $(#[$cont_attr])*
-            #[serde(bound(deserialize = "'de: 'a, 'a: 'de"))]
+            #[serde(bound(deserialize = "'de: 'from_response, 'from_response: 'de"))]
             #[doc(hidden)]
-            pub(crate) struct [<$name Response>]<'a, $($($life),* $($generic),*)?>
+            pub(crate) struct [<$name Response>]<'from_response, $($($life),* $($generic),*)?>
             where
-                $($ty: $crate::rest::FromResponse,)*
+                $($ty: $crate::rest::FromResponse<'from_response>,)*
             {
                 $(
                     $(#[$field_attr])*
-                    $field: <$ty as $crate::rest::FromResponse>::Response<'a>,
+                    $field: <$ty as $crate::rest::FromResponse<'from_response>>::Response,
                 )+
             }
 
             // Manually implementing Debug to avoid unnecessary T: Debug bound created by the Debug macro
-            impl<'a, $($($life),* $($generic),*)?> std::fmt::Debug for [<$name Response>]<'a, $($($life),* $($generic),*)?>
+            impl<'from_response, $($($life),* $($generic),*)?> std::fmt::Debug for [<$name Response>]<'from_response, $($($life),* $($generic),*)?>
             where
-                $($ty: $crate::rest::FromResponse,)*
+                $($ty: $crate::rest::FromResponse<'from_response>,)*
             {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     let mut debug_struct = f.debug_struct(stringify!([<$name Response>]));
@@ -1115,15 +1313,15 @@ macro_rules! FromResponse {
         )*
     } => {
         paste::paste!(
-            impl<$($($life,)* $($generic,)*)?> $crate::rest::FromResponse for $name $(<$($life),* $($generic),*>)?
+            impl<'from_response, $($($life,)* $($generic,)*)?> $crate::rest::FromResponse<'from_response> for $name $(<$($life),* $($generic),*>)?
             where
-                $($ty: $crate::rest::FromResponse,)*
+                $($ty: $crate::rest::FromResponse<'from_response>,)*
             {
-                type Response<'a> = [<$name Response>]<'a, $($($generic),*)?>;
+                type Response = [<$name Response>]<'from_response, $($($generic),*)?>;
 
                 #[inline]
-                fn from_response<'a>(
-                    response: Self::Response<'a>,
+                fn from_response(
+                    response: Self::Response,
                 ) -> Result<Self, $crate::error::ServiceErrorKind> {
                     Ok(match response {
                         $(
@@ -1136,15 +1334,15 @@ macro_rules! FromResponse {
 
             #[derive(Debug, ::serde::Deserialize)]
             $(#[$cont_attr])*
-            #[serde(bound(deserialize = "'de: 'a, 'a: 'de"))]
+            #[serde(bound(deserialize = "'de: 'from_response"))]
             #[doc(hidden)]
-            pub(crate) enum [<$name Response>]<'a, $($($life),* $($generic),*)?>
+            pub(crate) enum [<$name Response>]<'from_response, $($($life),* $($generic),*)?>
             where
-                $($ty: $crate::rest::FromResponse,)*
+                $($ty: $crate::rest::FromResponse<'from_response>,)*
             {
                 $(
                     $(#[$variant_attr])*
-                    $variant(<$ty as $crate::rest::FromResponse>::Response<'a>),
+                    $variant(<$ty as $crate::rest::FromResponse<'from_response>>::Response),
                 )+
             }
         );
@@ -1173,8 +1371,6 @@ macro_rules! IntoRequest {
             where
                 $($ty: $crate::rest::IntoMessageRequest,)*
             {
-                type Request = [<$name Request>]<$($($generic),*)?>;
-
                 type Output = [<$name Output>]<$($($generic),*)?>;
 
                 #[inline]
@@ -1205,10 +1401,10 @@ macro_rules! IntoRequest {
                 type Request = [<$name Request>]<$($($life),* $($generic),*)?>;
 
                 #[inline]
-                fn with_auth(self, auth: &$crate::client::Auth) -> Self {
+                fn with_auth(self, auth: std::borrow::Cow<'_, $crate::client::Auth>) -> Self {
                     Self {
                         $(
-                            $field: self.$field.with_auth(auth),
+                            $field: self.$field.with_auth(std::borrow::Cow::Borrowed(&*auth)),
                         )*
                     }
                 }
@@ -1233,8 +1429,70 @@ macro_rules! IntoRequest {
             {
                 $(
                     $(#[$field_attr])*
-                    $field: <$ty as $crate::rest::IntoMessageRequest>::Request,
+                    $field: <<$ty as $crate::rest::IntoMessageRequest>::Output as $crate::rest::IntoMessageRequestOutput>::Request,
                 )+
+            }
+
+            #[cfg(feature = "batch")]
+            impl $crate::batch::Requests for [<$name Output>] {
+                type BatchHandler = [<$name Handler>];
+
+                type ResponseReference = <Self as $crate::rest::IntoMessageRequestOutput>::Request;
+
+                fn into_batch_ref(
+                    self,
+                    f: &mut $crate::batch::Formatter,
+                ) -> Result<(Self::BatchHandler, Self::ResponseReference), $crate::batch::FormatError> {
+                    $(
+                        let $field = self.$field.into_batch_ref(f)?;
+                    )*
+
+                    let handler = Self::BatchHandler {
+                        $(
+                            $field: $field.0,
+                        )*
+                    };
+
+                    let request = Self::ResponseReference {
+                        $(
+                            $field: $field.1,
+                        )*
+                    };
+
+                    Ok((handler, request))
+                }
+
+                fn size_hint(&self) -> (usize, Option<usize>) {
+                    ($( self.$field.size_hint().0 + )* 0, None)
+                }
+
+                $crate::requests_batch_include! {}
+            }
+
+            #[cfg(feature = "batch")]
+            pub(crate) struct [<$name Handler>]
+            where
+                $($ty: $crate::rest::IntoMessageRequest,)*
+                // Bound life
+            {
+                $(
+                    $field: <<$ty as $crate::rest::IntoMessageRequest>::Output as $crate::batch::Requests>::BatchHandler,
+                )+
+            }
+
+            #[cfg(feature = "batch")]
+            impl $crate::batch::Handler for [<$name Handler>] {
+                // We don't need the response... mm stressed
+                type Responses = ();
+
+                fn from_batch(self, response: &mut $crate::batch::BatchResponse)
+                    -> Result<Self::Responses, $crate::batch::FromResponseError> {
+                    $(
+                        let _ = self.$field.from_batch(response)?;
+                    )*
+
+                    Ok(())
+                }
             }
         );
     };
@@ -1256,8 +1514,6 @@ macro_rules! IntoRequest {
             where
                 $($ty: $crate::rest::IntoMessageRequest,)*
             {
-                type Request = [<$name Request>]<$($($generic),*)?>;
-
                 type Output = [<$name Output>]<$($($generic),*)?>;
 
                 #[inline]
@@ -1289,7 +1545,7 @@ macro_rules! IntoRequest {
                 type Request = [<$name Request>]<$($($life),* $($generic),*)?>;
 
                 #[inline]
-                fn with_auth(self, auth: &$crate::client::Auth) -> Self {
+                fn with_auth(self, auth: std::borrow::Cow<'_, $crate::client::Auth>) -> Self {
                     match self {
                         $(
                             Self::$variant(inner) =>
@@ -1318,10 +1574,66 @@ macro_rules! IntoRequest {
             {
                 $(
                     $(#[$variant_attr])*
-                    $variant(<$ty as $crate::rest::IntoMessageRequest>::Request),
+                    $variant(<<$ty as $crate::rest::IntoMessageRequest>::Output as $crate::rest::IntoMessageRequestOutput>::Request),
                 )+
             }
 
+
+            #[cfg(feature = "batch")]
+            impl $crate::batch::Requests for [<$name Output>] {
+                type BatchHandler = [<$name Handler>];
+
+                type ResponseReference = <Self as $crate::rest::IntoMessageRequestOutput>::Request;
+
+                fn into_batch_ref(
+                    self,
+                    f: &mut $crate::batch::Formatter,
+                ) -> Result<(Self::BatchHandler, Self::ResponseReference), $crate::batch::FormatError> {
+                    Ok(match self {
+                        $(
+                            Self::$variant(inner) => {
+                                let (h, r) = inner.into_batch_ref(f)?;
+                                (Self::BatchHandler::$variant(h), Self::ResponseReference::$variant(r))
+                            },
+                        )*
+                    })
+                }
+
+                fn size_hint(&self) -> (usize, Option<usize>) {
+                    match self {
+                        $(
+                            Self::$variant(inner) => inner.size_hint(),
+                        )*
+                    }
+                }
+
+                $crate::requests_batch_include! {}
+            }
+
+            #[cfg(feature = "batch")]
+            pub(crate) enum [<$name Handler>] {
+                $(
+                    $variant(<<$ty as $crate::rest::IntoMessageRequest>::Output as $crate::batch::Requests>::BatchHandler),
+                )+
+            }
+
+            #[cfg(feature = "batch")]
+            impl $crate::batch::Handler for [<$name Handler>] {
+                // We don't need the response... mm stressed
+                type Responses = ();
+
+                fn from_batch(self, response: &mut $crate::batch::BatchResponse)
+                    -> Result<Self::Responses, $crate::batch::FromResponseError> {
+                    match self {
+                        $(
+                            Self::$variant(inner) => {
+                                let _ = inner.from_batch(response)?;
+                                Ok(())
+                            },
+                        )+
+                     }
+                }
+            }
         );
     }
 }
