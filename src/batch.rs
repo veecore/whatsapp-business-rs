@@ -1869,6 +1869,7 @@ impl AsRef<[u8]> for JsonReqwestBody {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct RequestDebug {
     pub url: String,
 }
