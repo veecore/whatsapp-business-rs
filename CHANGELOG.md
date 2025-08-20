@@ -59,4 +59,4 @@
 * Removed blanket `Into<String>` implementations for auths.
 
   * Replaced with explicit support for `Cow`, `String`, and `&str`.
-  * Most existing code should continue to compiles.
+  * Most existing code should continue to compile.
