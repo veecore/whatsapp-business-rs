@@ -48,6 +48,7 @@ macro_rules! setup {
                 .unwrap()
                 .block_on(wiremock::MockServer::start());
 
+            // TODO: temp_env has async_with_vars
             fn closure($server: wiremock::MockServer) {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()

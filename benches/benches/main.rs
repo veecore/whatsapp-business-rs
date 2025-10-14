@@ -17,14 +17,30 @@ pub const ACCESS_TOKEN: &str = "EAAD...";
 #[allow(dead_code)]
 pub const RECIPIENT_ID: &str = "16505551234";
 
+use batch_benches::bench_roundtrip_batch;
 use criterion::{criterion_group, criterion_main};
 
-use serialization::*;
+use messages_benches::{
+    bench_roundtrip_mark_message_as_read, bench_roundtrip_send_message, bench_roundtrip_set_typing,
+};
+
+// TODO
+pub struct ReleaseLock;
+impl Drop for ReleaseLock {
+    fn drop(&mut self) {}
+}
+
+pub fn set_env_till_m_done(uri: String) -> ReleaseLock {
+    // Benches are run in series
+    unsafe { std::env::set_var("API_BASE_URL_FOR_TESTING", uri) };
+    ReleaseLock
+}
 
 criterion_group!(
     benches,
-    // encoding_benches
-    // batch_body_encode,
-    // bench_serde_json_collect_str,
+    bench_roundtrip_send_message,
+    bench_roundtrip_mark_message_as_read,
+    bench_roundtrip_set_typing,
+    bench_roundtrip_batch
 );
 criterion_main!(benches);

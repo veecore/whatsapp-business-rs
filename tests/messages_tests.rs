@@ -511,6 +511,47 @@ async fn test_mark_message_as_read() {
 }
 
 #[tokio::test]
+async fn test_set_typing() {
+    let mock_server = MockServer::start().await;
+    // Arrange
+    let client = Client::builder()
+        .api_version("23.0")
+        .auth(ACCESS_TOKEN)
+        .build()
+        .unwrap();
+    let messages = client.message(PHONE_ID);
+
+    let message_to_mark_id = "wamid.incoming_message_id";
+    // Typing indicates read
+    let request_body = json!({
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "typing_indicator": {
+            "type": "text"
+        },
+        "message_id": message_to_mark_id,
+    });
+
+    Mock::given(method("POST"))
+        .and(path(format!("/v23.0/{}/messages", PHONE_ID)))
+        .and(bearer_token(ACCESS_TOKEN))
+        .and(body_json(&request_body))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true})))
+        .mount(&mock_server)
+        .await;
+
+    // Act
+    let message_ref = MessageRef::from(message_to_mark_id);
+    let result = hold_env_var_for_me! {
+        mock_server,
+        messages.set_replying(message_ref),
+    };
+
+    // Assert
+    result.unwrap()
+}
+
+#[tokio::test]
 async fn test_upload_media_success() {
     let mock_server = MockServer::start().await;
     // Arrange

@@ -1452,13 +1452,11 @@ impl<'a, const N: usize> Endpoint<'a, N> {
 
         /* "https://graph.facebook.com" / v$api_version $(/ $path)+ */
         #[cfg(not(feature = "test-mode"))]
-        {
-            url.push_str(GRAPH_ENDPOINT)
-        };
+        url.push_str(GRAPH_ENDPOINT);
+
         #[cfg(feature = "test-mode")]
-        {
-            url.push_str(Self::get_base_url_for_test().as_str())
-        };
+        url.push_str(Self::get_base_url_for_test().as_str());
+
         if let Some(version) = self.api_version {
             url.push_str("/v");
             url.push_str(version);
