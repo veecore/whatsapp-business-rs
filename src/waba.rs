@@ -64,10 +64,11 @@ use std::{borrow::Cow, marker::PhantomData};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    CatalogRef, Fields, ToValue, Waba,
     client::{Client, Endpoint, FieldsQuery},
     execute_request,
     rest::client::RegisterPhoneRequest,
-    view_ref, CatalogRef, Fields, ToValue, Waba,
+    view_ref,
 };
 
 ///
@@ -247,7 +248,10 @@ impl<'i> WabaManager<'i> {
     /// ```
     pub fn list_flows(&self) -> ListFlow {
         let url = self.endpoint("flows");
-        let request = self.client.get(url).query(FieldsQuery::base(&["id", "name"]));
+        let request = self
+            .client
+            .get(url)
+            .query(FieldsQuery::base(&["id", "name"]));
 
         ListFlow { request }
     }

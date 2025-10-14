@@ -8,7 +8,7 @@ fn main() {
         .expect("failed to run rustc --version");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     println!("cargo:rustc-check-cfg=cfg(nightly_rust)");
     if stdout.contains("nightly") {
         println!("cargo:rustc-cfg=nightly_rust");

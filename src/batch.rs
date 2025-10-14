@@ -2032,14 +2032,14 @@ impl<P: Serialize> Serialize for FormEncoded<P> {
         // Man can't be too sure of himself.
         struct DisplayCatchSerError<'a, V> {
             value: &'a V,
-            err: std::cell::Cell<Option<serde_metaform::error::Error>>
+            err: std::cell::Cell<Option<serde_metaform::error::Error>>,
         }
 
         impl<'a, V: Serialize> Display for DisplayCatchSerError<'a, V> {
             #[inline]
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 if let Err(err) = serde_metaform::to_writer(f, self.value) {
-                    self.err.set(Some(err));       
+                    self.err.set(Some(err));
                 }
                 Ok(())
             }
@@ -2047,12 +2047,14 @@ impl<P: Serialize> Serialize for FormEncoded<P> {
 
         let display = DisplayCatchSerError {
             value: &self.0,
-            err: None.into()
+            err: None.into(),
         };
         let ok = serializer.collect_str(&display)?;
 
         if let Some(err) = display.err.into_inner() {
-            Err(<S::Error as serde::ser::Error>::custom(format!("Error while formatting form body: {err}")))
+            Err(<S::Error as serde::ser::Error>::custom(format!(
+                "Error while formatting form body: {err}"
+            )))
         } else {
             Ok(ok)
         }

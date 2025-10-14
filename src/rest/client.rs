@@ -1468,7 +1468,7 @@ impl<'a> FromResponse<'a> for MessageCreate {
 // }
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateProductResponse {
-    pub id: String
+    pub id: String,
 }
 
 impl<'a> FromResponse<'a> for ProductCreate {

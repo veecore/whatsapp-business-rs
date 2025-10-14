@@ -1,10 +1,10 @@
 use axum::{
+    Router,
     body::Bytes,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::post,
-    Router,
 };
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Deserializer};
@@ -18,6 +18,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Notify};
 
 use crate::{
+    Identity, IdentityMetadata, IdentityRef, IdentityType, Timestamp, Waba,
     client::AppSecret,
     error::Error,
     message::{Content, Context as MessageContext, Message, MessageRef, MessageStatus},
@@ -25,12 +26,11 @@ use crate::{
         ConversationOrigin, ErrorContext, Event, EventContext, Handler, IncomingMessage,
         MessageUpdate, MessageUpdateContext, PartnerAdded, Server, WabaEvent,
     },
-    Identity, IdentityMetadata, IdentityRef, IdentityType, Timestamp, Waba,
 };
 
 use super::{
-    client::{deserialize_str, ContentResponse},
     FromResponse,
+    client::{ContentResponse, deserialize_str},
 };
 
 #[cfg(feature = "incoming_message_ext")]

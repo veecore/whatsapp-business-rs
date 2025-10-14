@@ -38,15 +38,14 @@
 
 use super::error::Error;
 use crate::{
-    App, CatalogRef, Fields, IdentityRef,
-    ToValue, Waba,
+    App, CatalogRef, Fields, IdentityRef, ToValue, Waba,
     app::{AppManager, Token},
     catalog::CatalogManager,
     message::{IntoDraft, MediaSource, MediaType, MessageCreate, MessageRef},
     rest::{
         self, IntoMessageRequestOutput,
         client::{
-            AccessTokenRequest, PendingMessagePayload, MessageStatusRequest, SendMessageResponse,
+            AccessTokenRequest, MessageStatusRequest, PendingMessagePayload, SendMessageResponse,
         },
         execute_request,
     },
@@ -69,7 +68,11 @@ use crate::batch::Batch;
 /// Default API version for WhatsApp Business API
 const DEFAULT_API_VERSION: &str = "22.0";
 /// Default user agent for the client
-const USER_AGENT: &str = concat!("whatsapp-business-rs/", env!("CARGO_PKG_VERSION"), " (Rust)");
+const USER_AGENT: &str = concat!(
+    "whatsapp-business-rs/",
+    env!("CARGO_PKG_VERSION"),
+    " (Rust)"
+);
 
 /// The primary entry point for interacting with the **WhatsApp Business API**.
 ///
@@ -579,7 +582,7 @@ impl ClientBuilder {
         self.http = self.http.timeout(duration);
         self
     }
-    
+
     /// Sets the WhatsApp API version to use (e.g. `"19.0"`).
     ///
     /// If you add the `"v"` prefix, it will be removed.
@@ -1435,7 +1438,7 @@ impl<'a, const N: usize> Endpoint<'a, N> {
         use std::ops::Add;
 
         /* "https://graph.facebook.com" / v$api_version $(/ $path)+ */
-        let size = GRAPH 
+        let size = GRAPH
             + if let Some(version) = self.api_version {
                 SLASH
                 + (V + version.len())
@@ -1448,10 +1451,12 @@ impl<'a, const N: usize> Endpoint<'a, N> {
         let mut url = String::with_capacity(size);
 
         /* "https://graph.facebook.com" / v$api_version $(/ $path)+ */
-        #[cfg(not(feature = "test-mode"))] {
-            url.push_str(GRAPH_ENDPOINT)            
+        #[cfg(not(feature = "test-mode"))]
+        {
+            url.push_str(GRAPH_ENDPOINT)
         };
-        #[cfg(feature = "test-mode")] {
+        #[cfg(feature = "test-mode")]
+        {
             url.push_str(Self::get_base_url_for_test().as_str())
         };
         if let Some(version) = self.api_version {
@@ -1470,8 +1475,7 @@ impl<'a, const N: usize> Endpoint<'a, N> {
     fn get_base_url_for_test() -> String {
         // During tests, we'll set "API_BASE_URL_FOR_TESTING".
         // Otherwise, it falls back to the production UnRL.
-        std::env::var("API_BASE_URL_FOR_TESTING")
-            .unwrap_or_else(|_| GRAPH_ENDPOINT.into())
+        std::env::var("API_BASE_URL_FOR_TESTING").unwrap_or_else(|_| GRAPH_ENDPOINT.into())
     }
 }
 
@@ -2040,10 +2044,7 @@ mod test {
 
     #[test]
     fn query() {
-        let chain_query = ChainQuery {
-            a: (),
-            b: (),
-        };
+        let chain_query = ChainQuery { a: (), b: () };
         let got = serde_urlencoded::to_string(chain_query).unwrap();
         assert_eq!(got, "");
 
@@ -2066,5 +2067,5 @@ mod test {
 
         let hv: HeaderValue = auth.try_into().unwrap();
         assert_eq!(hv.as_bytes(), b"Bearer IHIHF489)!  )_@-I_e(i");
-    }    
+    }
 }

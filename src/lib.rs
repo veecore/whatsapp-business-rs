@@ -690,8 +690,7 @@ pub struct Fields<Field> {
     // still don't belong here
     pub(crate) mandatory: &'static [&'static str],
     // meta should de-dup itself
-    pub(crate) fields: Vec<Field>
-    // pub(crate) fields: HashSet<Field>,
+    pub(crate) fields: Vec<Field>, // pub(crate) fields: HashSet<Field>,
 }
 
 impl<F> Default for Fields<F> {
@@ -761,7 +760,6 @@ where
             .collect::<Vec<_>>()
             .join(",");
 
-
         // Serialize the final string.
         serializer.serialize_str(&fields_query)
     }
@@ -779,7 +777,10 @@ where
     #[inline]
     fn from_iter<T: IntoIterator<Item = Field>>(iter: T) -> Self {
         let fields = Vec::from_iter(iter);
-        Self { fields, mandatory: &[] }
+        Self {
+            fields,
+            mandatory: &[],
+        }
     }
 }
 
@@ -849,7 +850,6 @@ where
 #[must_use = "Update does nothing unless you `.await` or `.execute().await` it"]
 pub struct Update<'a, T, U = ()> {
     // rid this struct
-
     pub(crate) request: PendingRequest<'static, JsonObjectPayload<T>>,
     response: PhantomData<U>,
     _marker: PhantomData<&'a ()>,
@@ -1127,7 +1127,7 @@ macro_rules! impl_to_value_strings {
                 Cow::Owned(Value::from(self))
             }
         }
-    }
+    };
 }
 
 impl_common_strings! {
@@ -1224,13 +1224,13 @@ impl<'a> ToValue<'a, Waba> for &'a Business {
 }
 
 // TODO: Reduce
-use client::{JsonObjectPayload, PendingRequest};
 pub use client::{Auth, Client};
+use client::{JsonObjectPayload, PendingRequest};
 pub use error::Error;
 pub use message::{Draft, Message};
 pub use server::{Handler as WebhookHandler, Server};
 
-use rest::{execute_request, macros::view_ref, FieldsTrait, FromResponseOwned};
+use rest::{FieldsTrait, FromResponseOwned, execute_request, macros::view_ref};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, fmt, marker::PhantomData, ops::Deref};
 

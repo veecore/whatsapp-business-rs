@@ -438,7 +438,7 @@ async fn test_send_interactive_message_with_product_list() {
             },
             "footer": {
                 "text": ""
-            }         
+            }
         }
     });
 
@@ -457,7 +457,12 @@ async fn test_send_interactive_message_with_product_list() {
     let products = Section::new("New Arrivals", [ProductRef::from("sku_123")]);
     let product_list = ProductList::new_section(products, catalog_id);
     // Using the (Header, Body, Action, Footer) tuple to create the draft
-    let interactive_message = ("Our Products", "Check out our new arrivals.", product_list, "");
+    let interactive_message = (
+        "Our Products",
+        "Check out our new arrivals.",
+        product_list,
+        "",
+    );
     let result = hold_env_var_for_me! {
         mock_server,
         messages.send(RECIPIENT_ID, interactive_message),
