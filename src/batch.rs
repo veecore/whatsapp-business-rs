@@ -2667,7 +2667,7 @@ mod tests {
         }
     }
 
-    crate::SimpleOutputBatch! {
+    SimpleOutputBatch! {
         RawRequest <> => ()
     }
 
