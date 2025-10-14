@@ -1,96 +1,79 @@
-// DOUBLE-CHECK OUR ENDPOINT USE.
+//! This module handles all API requests related to media management and the construction
+//! of message payloads that include media. It covers uploading, downloading, deleting,
+//! and retrieving media information, as well as preparing media content for various
+//! message types like images, documents, and interactive message headers.
 
 use std::{borrow::Cow, fmt::Display, marker::PhantomData, mem::transmute, str::FromStr};
 
-use super::{fut_net_op, FromResponse, IntoMessageRequest, IntoMessageRequestOutput};
+use super::{
+    FromResponse, FromResponseOwned, IntoMessageRequest, IntoMessageRequestOutput,
+    execute_multipart_request,
+};
 use crate::{
-    add_auth_to_request,
+    IdentityRef, MetaError,
     app::WebhookConfig,
     catalog::{MetaProductRef, ProductCreate, ProductRef},
     client::{
-        Auth, Client, DeleteMedia, Endpoint, MessageManager, UploadMedia,
+        Auth, Client, DeleteMedia, MessageManager, PendingRequest, UploadMedia,
         UploadMediaResponseReference,
     },
     error::{Error, ServiceError, ServiceErrorKind},
-    handle_arg,
     message::{
-        CatalogDisplayOptions, Draft, DraftContext, ErrorContent, InteractiveAction,
-        InteractiveHeaderMedia, Media, MediaSource, MediaType, MessageCreate, MessageRef,
-        MessageStatus, Text,
+        CatalogDisplayOptions, Draft, DraftContext, InteractiveAction, InteractiveHeaderMedia,
+        Media, MediaSource, MediaType, MessageCreate, MessageRef, MessageStatus, Text,
     },
     waba::AppInfo,
-    IdentityRef, MetaError, SimpleOutput,
 };
 use reqwest::{
+    Response, StatusCode, Url,
+    header::AUTHORIZATION,
     multipart::{Form, Part},
-    RequestBuilder, Response, StatusCode, Url,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::io::AsyncWrite;
 
 #[cfg(feature = "batch")]
-use crate::{reference, requests_batch_include};
+use crate::client::NullableUploadMediaHandler;
+
+// --- Core Media Operations ---
 
 impl Client {
-    /// Get media information. url, etc.
+    /// Builds a request to get media information, such as its public URL.
     pub(crate) fn get_media_info(&self, media_id: &str) -> GetMediaInfo {
         GetMediaInfo {
             request: self.get(self.a_node(media_id)),
         }
     }
 
-    pub(crate) fn get_media_info_patch(&self) -> GetMediaInfoPatch {
-        GetMediaInfoPatch {
-            endpoint: self.endpoint(),
-        }
-    }
-
-    /// Download media content from WhatsApp servers
+    /// Builds a request to download media content from WhatsApp servers.
+    /// This first retrieves the media's public URL and then downloads the content.
     pub(crate) fn download_media<'dst, Dst>(
         &self,
         media_id: &str,
         dst: &'dst mut Dst,
     ) -> DownloadMedia<'dst, Dst> {
         DownloadMedia {
-            media_info: self.get_media_info(media_id),
-            dst,
+            media_info_request: self.get_media_info(media_id),
+            destination: dst,
         }
     }
 
-    /// Download media from a direct URL
-    pub(crate) fn download_media_url<'dst, Dst>(
+    /// Builds a request to download media directly from a known URL.
+    pub(crate) fn download_media_from_url<'dst, Dst>(
         &self,
         url: &str,
         dst: &'dst mut Dst,
-    ) -> DownloadMediaUrl<'dst, Dst> {
-        DownloadMediaUrl {
+    ) -> DownloadMediaFromUrl<'dst, Dst> {
+        DownloadMediaFromUrl {
             request: self.get_external(url),
-            dst,
+            destination: dst,
         }
     }
 
-    /// Delete media from WhatsApp servers
+    /// Builds a request to delete media from WhatsApp servers.
     pub(crate) fn delete_media(&self, media_id: &str) -> DeleteMedia {
         DeleteMedia {
             request: self.delete(self.a_node(media_id)),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct GetMediaInfoPatch {
-    endpoint: Endpoint<'static>,
-}
-
-impl GetMediaInfoPatch {
-    fn into_actual<F>(self, get: F, media_id: &str) -> GetMediaInfo
-    where
-        // endpoint
-        F: FnOnce(String) -> RequestBuilder,
-    {
-        let endpoint = self.endpoint.join(media_id);
-        GetMediaInfo {
-            request: get(endpoint.as_url()),
         }
     }
 }
@@ -99,8 +82,9 @@ SimpleOutput! {
     GetMediaInfo => MediaInfo
 }
 
-#[derive(Clone)]
+// Batching support for GetMediaInfo
 #[cfg(feature = "batch")]
+#[derive(Clone)]
 pub struct GetMediaInfoResponseReference {
     reference_id: Cow<'static, str>,
 }
@@ -109,7 +93,7 @@ pub struct GetMediaInfoResponseReference {
 impl GetMediaInfoResponseReference {
     fn url(self) -> String {
         let id = self.reference_id;
-        crate::reference!(id => MediaInfo => [url])
+        reference!(id => MediaInfo => [url])
     }
 }
 
@@ -122,38 +106,41 @@ impl crate::batch::IntoResponseReference for GetMediaInfo {
     }
 }
 
-// Doesn't have with_auth to prevent leaking auth
-// TODO: Maybe we should check the url for facebook 'lookaside.fbsbx.com'
+/// A pending request to download media directly from a URL.
+/// It doesn't expose `with_auth` to prevent leaking the client's auth token
+/// to potentially external servers.
 #[derive(Debug)]
-pub(crate) struct DownloadMediaUrl<'dst, Dst> {
-    request: RequestBuilder,
-    dst: &'dst mut Dst,
+pub(crate) struct DownloadMediaFromUrl<'dst, Dst> {
+    request: PendingRequest<'static>,
+    destination: &'dst mut Dst,
 }
 
-impl<'dst, Dst: AsyncWrite + Send + Unpin> DownloadMediaUrl<'dst, Dst> {
+impl<'dst, Dst: AsyncWrite + Send + Unpin> DownloadMediaFromUrl<'dst, Dst> {
     pub(crate) async fn execute(self) -> Result<(), Error> {
-        let r_e = handle_arg!(self.request);
         #[cfg(debug_assertions)]
-        {
-            handle_media(r_e.0, self.dst, r_e.1).await
-        }
+        let endpoint = self.request.endpoint.clone();
+        let response = self.request.send().await?;
 
-        #[cfg(not(debug_assertions))]
-        {
-            handle_media(r_e, self.dst).await
-        }
+        stream_response_body_to_writer(
+            response,
+            self.destination,
+            #[cfg(debug_assertions)]
+            endpoint.into(),
+        )
+        .await
     }
 }
 
-async fn handle_media(
+/// Helper function to stream an HTTP response body into an async writer.
+async fn stream_response_body_to_writer(
     mut response: Response,
     dst: &mut (impl AsyncWrite + Send + Unpin),
     #[cfg(debug_assertions)] endpoint: Cow<'_, str>,
 ) -> Result<(), Error> {
     if !response.status().is_success() {
         let status = response.status();
-
-        return Err(Client::handle_not_ok(&response.bytes().await?)
+        let body = response.bytes().await?;
+        return Err(Client::handle_error_response(&body)
             .service(
                 #[cfg(debug_assertions)]
                 endpoint,
@@ -162,17 +149,8 @@ async fn handle_media(
             .into());
     }
 
-    // // Extract content type from headers
-    // let content_type = response
-    //     .headers()
-    //     .get(CONTENT_TYPE)
-    //     .and_then(|v| v.to_str().ok())
-    //     .map(str::to_owned);
-
     use tokio::io::AsyncWriteExt as _;
 
-    // reqwest seems to have its impls on the futures crate
-    // we'll just do the simple one...
     while let Some(chunk) = response.chunk().await? {
         dst.write_all(&chunk).await?;
     }
@@ -181,79 +159,45 @@ async fn handle_media(
     Ok(())
 }
 
-// This is a patch for dependent chains of output pending a lasting, efficient
-// solution...
-// SendMessage is  infact a part of this group but is unable to benefit from
-// this because it's more complex. But we're good as it's less dependent than
-// these guys... hope we don't encounter an unpatchable case.
-/// We take the output we depend on and the method to start us and return
-/// an authenticated closure
-macro_rules! inherit_auth {
-    ($output:ident, $method:ident) => {
-        let mut mut_output = $output;
-        // for base guys only
-        let request = mut_output.request;
-
-        let (client, request) = request.build_split();
-        let request = request?;
-
-        // Or get last?
-        let mut auth_headers = reqwest::header::HeaderMap::new();
-        request
-            .headers()
-            .get_all(reqwest::header::AUTHORIZATION)
-            .iter()
-            .for_each(|v| {
-                auth_headers.append(reqwest::header::AUTHORIZATION, v.clone());
-            });
-
-        let client_clone = client.clone();
-
-        mut_output.request = RequestBuilder::from_parts(client, request);
-        let $output = mut_output;
-
-        $method = |url| {
-            // FIXME: client is cloned again
-
-            // Since we had no header prior to now, we could just mutably set this
-            // on the Request
-            client_clone.$method(url).headers(auth_headers)
-        };
-    };
-}
-
+/// A pending request to download media by its ID.
+/// This is a two-step operation: get media info (URL), then download from the URL.
 pub(crate) struct DownloadMedia<'dst, Dst> {
-    media_info: GetMediaInfo,
-    dst: &'dst mut Dst,
+    media_info_request: GetMediaInfo,
+    destination: &'dst mut Dst,
 }
 
 impl<Dst> DownloadMedia<'_, Dst> {
     #[inline]
     pub(crate) fn with_auth(mut self, auth: &Auth) -> Self {
-        self.media_info = self.media_info.with_auth(auth);
+        self.media_info_request = self.media_info_request.with_auth(auth);
         self
     }
 }
 
 impl<'dst, Dst: AsyncWrite + Send + Unpin> DownloadMedia<'dst, Dst> {
     pub(crate) async fn execute(self) -> Result<(), Error> {
-        let media_info = self.media_info;
-        let get;
-        inherit_auth!(media_info, get);
+        let auth = self.media_info_request.request.auth.clone();
+        let client = self.media_info_request.request.client.clone();
 
-        let media_info = media_info.execute().await?;
+        // Step 1: Get the media info, which contains the download URL.
+        let media_info = self.media_info_request.execute().await?;
 
-        // For error
-        //
-        // consuming here would mean another parsing of the url in
-        // reqwest IntoUrl
         #[cfg(debug_assertions)]
         let endpoint = media_info.url.as_str().to_owned();
 
-        let response = get(media_info.url).send().await?;
-        handle_media(
+        // Step 2: Create and send a request to the URL from the media info.
+        let mut download_request = client.get(media_info.url);
+        if let Some(auth) = auth {
+            download_request = match auth {
+                Cow::Borrowed(auth) => download_request.header(AUTHORIZATION, auth),
+                Cow::Owned(auth) => download_request.header(AUTHORIZATION, auth),
+            };
+        }
+
+        let response = download_request.send().await?;
+        stream_response_body_to_writer(
             response,
-            self.dst,
+            self.destination,
             #[cfg(debug_assertions)]
             Cow::Owned(endpoint),
         )
@@ -261,9 +205,11 @@ impl<'dst, Dst: AsyncWrite + Send + Unpin> DownloadMedia<'dst, Dst> {
     }
 }
 
+// --- Media Payload Construction ---
+
 impl MessageManager<'_> {
-    /// Uploads media content.
-    pub(crate) fn upload_media_inner(
+    /// Prepares a media upload operation.
+    pub(crate) fn prepare_media_upload(
         &self,
         bytes: Vec<u8>,
         mime_type: Cow<'static, str>,
@@ -273,7 +219,7 @@ impl MessageManager<'_> {
         let part = Part::bytes(bytes)
             .file_name(filename)
             .mime_str(&mime_type)
-            .expect("valid mime_type");
+            .expect("BUG: mime_type should be valid");
 
         UploadMedia {
             request: self.client.post(url),
@@ -281,207 +227,108 @@ impl MessageManager<'_> {
         }
     }
 
-    pub(crate) fn resolve_media(
+    /// Creates a `MediaPayloadSource` which is a crucial enum that determines
+    /// whether media needs to be uploaded or can be referenced directly by ID or URL.
+    #[inline]
+    pub(crate) fn create_media_payload_source(
         &self,
         media_source: MediaSource,
         media_type: MediaType,
         filename: impl Into<Cow<'static, str>>,
-    ) -> ResolveMedia {
+    ) -> MediaPayloadSource {
         match media_source {
-            MediaSource::Bytes(bytes) => ResolveMedia::UploadMedia(Box::new(
-                self.upload_media_inner(bytes, media_type.mime_type(), filename),
+            MediaSource::Bytes(bytes) => MediaPayloadSource::FromBytes(Box::new(
+                self.prepare_media_upload(bytes, media_type.mime_type(), filename),
             )),
-            MediaSource::Link(url) => ResolveMedia::MediaRef(MediaRef::Link(url)),
-            MediaSource::Id(id) => ResolveMedia::MediaRef(MediaRef::Id(id)),
+            MediaSource::Link(url) => MediaPayloadSource::FromRef(MediaRef::Link(url)),
+            MediaSource::Id(id) => MediaPayloadSource::FromRef(MediaRef::Id(id)),
         }
     }
 }
 
+/// Represents the source of media for an outgoing message.
+/// It can be a reference to existing media (by ID or a public link) or
+/// new media that must be uploaded first. This enum abstracts that logic.
+pub(crate) enum MediaPayloadSource {
+    /// Media to be uploaded from raw bytes. The `UploadMedia` request will be
+    /// executed first, and its resulting ID will be used in the message.
+    FromBytes(Box<UploadMedia>),
+    /// A reference to media that already exists, either on WhatsApp's servers (Id)
+    /// or at a public URL (Link).
+    FromRef(MediaRef),
+}
+
 impl IntoMessageRequestOutput for UploadMedia {
-    type Request = String;
+    type Request = String; // The request output is the media ID string.
 
     #[inline]
     fn with_auth(mut self, auth: Cow<'_, Auth>) -> Self {
-        self.request = add_auth_to_request!(auth => self.request);
+        self.request.auth = Some(Cow::Owned(auth.into_owned()));
         self
     }
 
+    #[inline]
     async fn execute(self) -> Result<Self::Request, Error> {
         let form = Form::new()
             .text("messaging_product", "whatsapp")
             .part("file", self.media);
 
-        let media_id: MediaUploadResponse = fut_net_op(self.request.multipart(form)).await?;
-        Ok(media_id.id)
-    }
-}
-
-#[cfg(feature = "batch")]
-impl crate::batch::Requests for UploadMedia {
-    type BatchHandler = UploadMediaHandler;
-
-    type ResponseReference = UploadMediaResponseReference;
-
-    fn into_batch_ref(
-        self,
-        f: &mut crate::batch::Formatter,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        let mut request = f
-            .add_request(self.request)?
-            .binary(self.media)
-            .raw_json(br#"{"messaging_product": "whatsapp"}"#);
-
-        let name = request.get_name();
-        let reference = reference!(name => MediaUploadResponse => [id]);
-
         #[cfg(debug_assertions)]
-        let debug = request.finish()?;
+        let handle = async |endpoint: String, response| {
+            Client::handle_response(response, endpoint.into()).await
+        };
 
         #[cfg(not(debug_assertions))]
-        request.finish()?;
+        let handle = async |response| Client::handle_response(response).await;
 
-        Ok((
-            UploadMediaHandler {
-                #[cfg(debug_assertions)]
-                endpoint: debug.url.into(),
-            },
-            // TODO: Steal the mime_type back from reqwest so we can implement IntoDraft for maximum ease.
-            // might pay for Mime's overly big size.
-            UploadMediaResponseReference(reference),
-        ))
-    }
+        let response: MediaUploadResponse =
+            execute_multipart_request(self.request, form, handle).await?;
 
-    requests_batch_include! {}
-}
-
-#[derive(Debug)]
-#[cfg(feature = "batch")]
-pub struct UploadMediaHandler {
-    #[cfg(debug_assertions)]
-    endpoint: Cow<'static, str>,
-}
-
-#[cfg(feature = "batch")]
-impl crate::batch::Handler for UploadMediaHandler {
-    type Responses = Result<String, Error>;
-
-    fn from_batch(
-        self,
-        response: &mut crate::batch::BatchResponse,
-    ) -> Result<Self::Responses, crate::batch::FromResponseError> {
-        Ok(response
-            .handle_next_typical::<MediaUploadResponse>(
-                #[cfg(debug_assertions)]
-                self.endpoint,
-            )?
-            .map(|r| r.id))
+        Ok(response.id)
     }
 }
 
-pub(crate) enum ResolveMedia {
-    UploadMedia(Box<UploadMedia>),
-    MediaRef(MediaRef),
-}
-
+/// Represents a reference to media, used after it has been uploaded or if it's external.
+/// This struct is serialized directly into message payloads.
 /// `NOTE`: Should be flattened when used
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MediaRef {
-    // Actual id or a reference to uploadmedia's response id using JSONPath
+    /// An ID of media already uploaded to WhatsApp.
     Id(String),
+    /// A public URL pointing to the media.
     Link(String),
 }
 
-impl IntoMessageRequestOutput for ResolveMedia {
+impl IntoMessageRequestOutput for MediaPayloadSource {
     type Request = MediaRef;
 
-    fn with_auth(mut self, auth: Cow<'_, Auth>) -> Self {
-        if let Self::UploadMedia(mut upload_media) = self {
-            *upload_media = upload_media.with_auth(auth);
-            self = Self::UploadMedia(upload_media);
-            self
-        } else {
-            self
+    #[inline]
+    fn with_auth(self, auth: Cow<'_, Auth>) -> Self {
+        match self {
+            Self::FromBytes(mut upload_media) => {
+                *upload_media = upload_media.with_auth(auth);
+                Self::FromBytes(upload_media)
+            }
+            Self::FromRef(_) => self, // No auth needed for a simple reference.
         }
     }
 
+    #[inline]
     async fn execute(self) -> Result<Self::Request, Error> {
         match self {
-            ResolveMedia::UploadMedia(upload_media) => {
+            MediaPayloadSource::FromBytes(upload_media) => {
                 let id = upload_media.execute().await?;
                 Ok(MediaRef::Id(id))
             }
-            ResolveMedia::MediaRef(media_ref) => Ok(media_ref),
+            MediaPayloadSource::FromRef(media_ref) => Ok(media_ref),
         }
     }
 }
 
-#[cfg(feature = "batch")]
-impl crate::batch::Requests for ResolveMedia {
-    type BatchHandler = Option<crate::batch::NullableUnit<UploadMediaHandler>>;
-
-    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
-
-    fn into_batch_ref(
-        self,
-        f: &mut crate::batch::Formatter,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        match self {
-            ResolveMedia::UploadMedia(upload_media) => {
-                let (handler, id) = upload_media.into_batch_ref(f)?;
-                Ok((
-                    Some(crate::batch::NullableUnit(handler)),
-                    MediaRef::Id(id.0),
-                ))
-            }
-            ResolveMedia::MediaRef(media_ref) => Ok((None, media_ref)),
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        if let Self::UploadMedia(upload_media) = &self {
-            upload_media.size_hint()
-        } else {
-            (0, Some(0))
-        }
-    }
-
-    requests_batch_include! {}
-}
-
-/// Media information API response
-#[derive(Debug, Deserialize)]
-pub struct MediaInfo {
-    // messaging_product: String,
-    #[serde(deserialize_with = "url_parse")]
-    url: Url,
-    // mime_type: String,
-    // sha256: String,
-    // With reserve on AsyncWrite, this would be useful
-    // file_size: u64,
-    // // like I literally used this to get you
-    // id: String,
-}
-
-fn url_parse<'de, D>(d: D) -> Result<Url, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw = <Cow<'_, str>>::deserialize(d)?;
-    raw.parse().map_err(|err| {
-        <D::Error as serde::de::Error>::custom(format!("Invalid MediaInfo.url: {raw}: {err}"))
-    })
-}
-
-/// Media upload API response
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct MediaUploadResponse {
-    id: String,
-}
-
-/// Media content request structure.
+/// The final, serializable representation of media content in a message.
 #[derive(Serialize, Clone, Debug)]
-pub(crate) struct MediaContentRequest {
+pub(crate) struct MediaPayload {
     #[serde(flatten)]
     pub(crate) media: MediaRef,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -490,97 +337,156 @@ pub(crate) struct MediaContentRequest {
     pub(crate) filename: Option<String>,
 }
 
-pub(crate) struct MediaOutput {
-    pub(crate) media: ResolveMedia,
+/// An intermediate builder for a `MediaPayload`. It holds the `MediaPayloadSource`
+/// which will be executed to get the final `MediaRef`.
+pub(crate) struct PendingMediaPayload {
+    pub(crate) source: MediaPayloadSource,
     pub(crate) caption: Option<String>,
     pub(crate) filename: Option<String>,
 }
 
-impl IntoMessageRequestOutput for MediaOutput {
-    type Request = MediaContentRequest;
+impl IntoMessageRequestOutput for PendingMediaPayload {
+    type Request = MediaPayload;
 
     #[inline]
     fn with_auth(mut self, auth: Cow<'_, Auth>) -> Self {
-        self.media = self.media.with_auth(auth);
+        self.source = self.source.with_auth(auth);
         self
     }
 
+    #[inline]
     async fn execute(self) -> Result<Self::Request, Error> {
         Ok(Self::Request {
-            media: self.media.execute().await?,
+            media: self.source.execute().await?,
             caption: self.caption,
             filename: self.filename,
         })
     }
 }
 
-#[cfg(feature = "batch")]
-impl crate::batch::Requests for MediaOutput {
-    type BatchHandler = <ResolveMedia as crate::batch::Requests>::BatchHandler;
-
-    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
-
-    fn into_batch_ref(
-        self,
-        f: &mut crate::batch::Formatter,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        let (h, r) = self.media.into_batch_ref(f)?;
-
-        let request = Self::ResponseReference {
-            media: r,
-            caption: self.caption,
-            filename: self.filename,
-        };
-
-        Ok((h, request))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.media.size_hint()
-    }
-
-    requests_batch_include! {}
-}
-
 impl Media {
-    // Some("OAuthException"), message: Some("An unknown error has occurred."),
-    //
-    // got some "unknown error" for not having filename
-    // ... we really shouldn't do this though
+    /// Provides a default filename. The API sometimes returns an "unknown error"
+    /// if a filename is missing for certain media types.
     pub(crate) fn default_filename() -> &'static str {
-        "whatsapp_business_rs_set.ext"
+        // A generic extension is used as the actual file type is determined by mime_type.
+        "file.bin"
     }
 }
 
 impl IntoMessageRequest for Media {
-    type Output = MediaOutput;
+    type Output = PendingMediaPayload;
 
+    #[inline]
     fn into_request<'i, 't>(
         self,
         manager: &MessageManager<'i>,
         _to: &'t IdentityRef,
     ) -> Self::Output {
-        let filename = self.filename.as_ref().map_or_else(
-            || Cow::Borrowed(Self::default_filename()),
-            |f| Cow::Owned(f.clone()),
-        );
+        // Ensure a filename is present if not provided by the user.
+        let filename = self
+            .filename
+            .clone()
+            .map(Cow::Owned)
+            .unwrap_or_else(|| Cow::Borrowed(Self::default_filename()));
 
         Self::Output {
-            media: manager.resolve_media(self.media_source, self.media_type, filename),
+            source: manager.create_media_payload_source(
+                self.media_source,
+                self.media_type,
+                filename,
+            ),
             caption: self.caption.map(|c| c.body),
             filename: self.filename,
         }
     }
 }
 
-impl InteractiveHeaderMedia {
-    fn default_filename() -> &'static str {
-        "whatsapp_business_rs_set.ext"
+// --- Interactive Media Header Handling ---
+
+/// A final, serializable payload for an interactive message's media header.
+#[derive(Serialize, Clone, Debug)]
+pub(crate) struct InteractiveMediaHeaderPayload {
+    pub(crate) link: String,
+}
+
+/// A staged, two-step operation required for interactive media headers.
+/// The WhatsApp API requires a public URL for header media, not a media ID.
+/// This struct encapsulates the process:
+/// 1. Upload the media to get an ID.
+/// 2. Use the ID to get media info, which contains the public URL.
+struct StagedInteractiveHeader {
+    client: Client,
+    upload_media: UploadMedia,
+}
+
+impl StagedInteractiveHeader {
+    fn with_auth(mut self, auth: Cow<'_, Auth>) -> Self {
+        self.upload_media.request.auth = Some(Cow::Owned(auth.into_owned()));
+        self
+    }
+
+    #[inline]
+    async fn execute(self) -> Result<String, Error> {
+        // Note: We could batch this but it'd be too much work
+        // for nothing
+        let auth = self.upload_media.request.auth.clone();
+
+        // Step 1: Upload media to get an ID.
+        let media_id = self.upload_media.execute().await?;
+
+        // Step 2: Use the ID to get the media info containing the public URL.
+        let mut get_info_request = self.client.get_media_info(&media_id);
+        if let Some(auth_token) = auth {
+            get_info_request = get_info_request.with_auth(auth_token);
+        }
+        let info = get_info_request.execute().await?;
+        Ok(info.url.into())
+    }
+}
+
+/// An intermediate builder for an interactive media header. It resolves the media source
+/// into a public URL, performing an upload and info-fetch if necessary.
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum PendingInteractiveMediaHeader {
+    /// Media that needs to be uploaded, then its info fetched.
+    FromUpload(Box<StagedInteractiveHeader>),
+    /// Media that already has an ID, so its info just needs to be fetched.
+    FromId(Box<GetMediaInfo>),
+    /// A direct public link, which can be used as-is.
+    FromLink(String),
+}
+
+impl IntoMessageRequestOutput for PendingInteractiveMediaHeader {
+    type Request = InteractiveMediaHeaderPayload;
+
+    #[inline]
+    fn with_auth(self, auth: Cow<'_, Auth>) -> Self {
+        match self {
+            Self::FromUpload(mut staged_op) => {
+                *staged_op = staged_op.with_auth(auth);
+                Self::FromUpload(staged_op)
+            }
+            Self::FromId(mut get_info) => {
+                *get_info = get_info.with_auth(auth);
+                Self::FromId(get_info)
+            }
+            Self::FromLink(_) => self,
+        }
+    }
+
+    #[inline]
+    async fn execute(self) -> Result<Self::Request, Error> {
+        let link = match self {
+            Self::FromUpload(staged_op) => staged_op.execute().await?,
+            Self::FromId(get_info) => get_info.execute().await?.url.into(),
+            Self::FromLink(link) => link,
+        };
+        Ok(Self::Request { link })
     }
 }
 
 impl IntoMessageRequest for InteractiveHeaderMedia {
-    type Output = InteractiveMediaOutput;
+    type Output = PendingInteractiveMediaHeader;
 
     #[inline]
     fn into_request<'i, 't>(
@@ -588,161 +494,29 @@ impl IntoMessageRequest for InteractiveHeaderMedia {
         manager: &MessageManager<'i>,
         _to: &'t IdentityRef,
     ) -> Self::Output {
-        let filename = Cow::Borrowed(Self::default_filename());
+        // Interactive headers don't support custom filenames, so we use a default.
+        let filename = Cow::Borrowed(Media::default_filename());
         match self.media_source {
-            MediaSource::Bytes(bytes) => Self::Output::UploadMedia((
-                Box::new(manager.upload_media_inner(bytes, self.media_type.mime_type(), filename)),
-                manager.client.get_media_info_patch(),
-            )),
-            MediaSource::Id(id) => Self::Output::Id(Box::new(manager.client.get_media_info(&id))),
-            MediaSource::Link(url) => Self::Output::Link(url),
+            MediaSource::Bytes(bytes) => {
+                let upload_media =
+                    manager.prepare_media_upload(bytes, self.media_type.mime_type(), filename);
+
+                let staged_op = StagedInteractiveHeader {
+                    client: manager.client.clone(),
+                    upload_media,
+                };
+                Self::Output::FromUpload(Box::new(staged_op))
+            }
+            MediaSource::Id(id) => {
+                Self::Output::FromId(Box::new(manager.client.get_media_info(&id)))
+            }
+            MediaSource::Link(url) => Self::Output::FromLink(url),
         }
     }
 }
 
-#[derive(Serialize, Clone, Debug)]
-pub(crate) struct InteractiveMediaContentRequest {
-    pub(crate) link: String,
-}
-
-pub(crate) enum InteractiveMediaOutput {
-    // This may later be solved by some OutputChain
-    // so we have Box<OutputChain<UploadMedia, GetMediaInfo>> or similar
-    UploadMedia((Box<UploadMedia>, GetMediaInfoPatch)),
-    Id(Box<GetMediaInfo>),
-    Link(String),
-}
-
-impl IntoMessageRequestOutput for InteractiveMediaOutput {
-    type Request = InteractiveMediaContentRequest;
-
-    #[inline]
-    fn with_auth(mut self, auth: Cow<'_, Auth>) -> Self {
-        match self {
-            Self::UploadMedia(mut upload_media) => {
-                *upload_media.0 = upload_media.0.with_auth(auth);
-                self = Self::UploadMedia(upload_media);
-                self
-            }
-            Self::Id(mut get_media_info) => {
-                *get_media_info = get_media_info.with_auth(auth);
-                self = Self::Id(get_media_info);
-                self
-            }
-            _ => self,
-        }
-    }
-
-    #[inline]
-    async fn execute(self) -> Result<Self::Request, Error> {
-        let link = match self {
-            Self::UploadMedia((upload_media, get_info)) => {
-                let get;
-                inherit_auth!(upload_media, get);
-
-                let upload_media = upload_media.execute().await?;
-
-                get_info
-                    .into_actual(get, &upload_media)
-                    .execute()
-                    .await?
-                    .url
-                    .into()
-            }
-            Self::Id(get_media_info) => get_media_info.execute().await?.url.into(),
-            Self::Link(link) => link,
-        };
-        Ok(Self::Request { link })
-    }
-}
-
-use crate::batch::Nullable as _;
-
-#[cfg(feature = "batch")]
-impl crate::batch::Requests for InteractiveMediaOutput {
-    // TODO: Have some fused method on Handler to make this easy
-    type BatchHandler = InteractiveMediaOutputBatchHandler;
-
-    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
-
-    fn into_batch_ref(
-        self,
-        f: &mut crate::batch::Formatter,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        // Won't work but for completeness
-        let (handler, link) = match self {
-            Self::UploadMedia((upload_media, get_info)) => {
-                let get;
-                inherit_auth!(upload_media, get);
-
-                let (upload_media_h, upload_media_r) = upload_media.into_batch_ref(f)?;
-
-                let (get_info_h, get_info_r) = get_info
-                    .into_actual(get, &upload_media_r.0)
-                    .nullable()
-                    .into_batch_ref(f)?;
-
-                (
-                    InteractiveMediaOutputBatchHandler::UploadMedia((
-                        crate::batch::NullableUnit(upload_media_h),
-                        get_info_h,
-                    )),
-                    get_info_r.url(),
-                )
-            }
-            Self::Id(get_media_info) => {
-                let (h, r) = get_media_info.nullable().into_batch_ref(f)?;
-                (InteractiveMediaOutputBatchHandler::Id(h), r.url())
-            }
-            Self::Link(link) => (InteractiveMediaOutputBatchHandler::Link, link),
-        };
-
-        Ok((handler, Self::ResponseReference { link }))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Self::UploadMedia(_) => (2, None),
-            Self::Id(_) => (1, Some(1)),
-            Self::Link(_) => (0, Some(0)),
-        }
-    }
-
-    requests_batch_include! {}
-}
-
-#[cfg(feature = "batch")]
-pub(crate) enum InteractiveMediaOutputBatchHandler {
-    UploadMedia((crate::batch::NullableUnit<UploadMediaHandler>, <<GetMediaInfo as crate::batch::Nullable>::Nullable as crate::batch::Requests>::BatchHandler)),
-    Id(<<GetMediaInfo as crate::batch::Nullable>::Nullable as crate::batch::Requests>::BatchHandler),
-    Link
-}
-
-#[cfg(feature = "batch")]
-impl crate::batch::Handler for InteractiveMediaOutputBatchHandler {
-    type Responses = ();
-
-    fn from_batch(
-        self,
-        response: &mut crate::batch::BatchResponse,
-    ) -> Result<Self::Responses, crate::batch::FromResponseError> {
-        match self {
-            Self::UploadMedia((first, second)) => {
-                first.from_batch(response)?;
-                second.from_batch(response)?;
-                Ok(())
-            }
-            Self::Id(id) => {
-                id.from_batch(response)?;
-                Ok(())
-            }
-            Self::Link => Ok(()),
-        }
-    }
-}
-
-pub(crate) type ContentRequest = crate::message::ContentRequest;
-pub(crate) type ContentRequestOutput = crate::message::ContentOutput;
+pub(crate) type ContentPayload = crate::message::ContentRequest;
+pub(crate) type PendingContentPayload = crate::message::ContentOutput;
 pub(crate) type ContentResponse<'a> = crate::message::ContentResponse<'a>;
 
 impl Draft {
@@ -751,8 +525,8 @@ impl Draft {
         self,
         manager: &MessageManager<'i>,
         to: Cow<'t, IdentityRef>,
-    ) -> MessageRequestOutput<'t> {
-        MessageRequestOutput {
+    ) -> PendingMessagePayload<'t> {
+        PendingMessagePayload {
             messaging_product: "whatsapp",
             biz_opaque_callback_data: self.biz_opaque_callback_data,
             content: self.content.into_request(manager, &to),
@@ -762,16 +536,16 @@ impl Draft {
     }
 }
 
-pub(crate) struct MessageRequestOutput<'t> {
+pub(crate) struct PendingMessagePayload<'t> {
     messaging_product: &'static str,
     biz_opaque_callback_data: Option<String>,
     to: Cow<'t, IdentityRef>,
     context: DraftContext,
-    content: ContentRequestOutput,
+    content: PendingContentPayload,
 }
 
-impl<'t> IntoMessageRequestOutput for MessageRequestOutput<'t> {
-    type Request = MessageRequest<'t>;
+impl<'t> IntoMessageRequestOutput for PendingMessagePayload<'t> {
+    type Request = MessagePayload<'t>;
 
     #[inline]
     fn with_auth(mut self, auth: Cow<'_, Auth>) -> Self {
@@ -791,39 +565,9 @@ impl<'t> IntoMessageRequestOutput for MessageRequestOutput<'t> {
     }
 }
 
-#[cfg(feature = "batch")]
-impl<'t> crate::batch::Requests for MessageRequestOutput<'t> {
-    type BatchHandler = <ContentRequestOutput as crate::batch::Requests>::BatchHandler;
-
-    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
-
-    fn into_batch_ref(
-        self,
-        f: &mut crate::batch::Formatter,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        let (h, r) = self.content.into_batch_ref(f)?;
-
-        let request = Self::ResponseReference {
-            messaging_product: self.messaging_product,
-            biz_opaque_callback_data: self.biz_opaque_callback_data,
-            to: self.to,
-            context: self.context,
-            content: r,
-        };
-
-        Ok((h, request))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.content.size_hint()
-    }
-
-    requests_batch_include! {}
-}
-
 /// Top-level message request structure
 #[derive(Serialize, Debug)]
-pub(crate) struct MessageRequest<'t> {
+pub(crate) struct MessagePayload<'t> {
     messaging_product: &'static str,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -836,7 +580,7 @@ pub(crate) struct MessageRequest<'t> {
     context: DraftContext,
 
     #[serde(flatten)]
-    content: ContentRequest,
+    content: ContentPayload,
 }
 
 impl DraftContext {
@@ -847,6 +591,7 @@ impl DraftContext {
 }
 
 impl<'de> Deserialize<'de> for MediaType {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -863,7 +608,7 @@ impl<'de> Deserialize<'de> for MediaType {
 pub(crate) struct MessageStatusRequest<'a> {
     messaging_product: &'static str,
     status: MessageStatus,
-    message_id: &'a str,
+    message_id: Cow<'a, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     typing_indicator: Option<TypingIndicator>,
 }
@@ -881,13 +626,16 @@ pub(crate) enum TypingIndicatorType {
     Text,
 }
 
-impl MessageRef {
+impl<'a> MessageStatusRequest<'a> {
     /// Create typing indicator request
-    pub(crate) fn set_typing(&self) -> MessageStatusRequest<'_> {
+    pub(crate) fn set_typing(message: Cow<'a, MessageRef>) -> Self {
         MessageStatusRequest {
             messaging_product: "whatsapp",
             status: MessageStatus::Read,
-            message_id: self.message_id(),
+            message_id: match message {
+                Cow::Borrowed(message) => Cow::Borrowed(&message.message_id),
+                Cow::Owned(message) => Cow::Owned(message.message_id),
+            },
             typing_indicator: Some(TypingIndicator {
                 r#type: TypingIndicatorType::Text,
             }),
@@ -895,14 +643,325 @@ impl MessageRef {
     }
 
     /// Create read receipt request
-    pub(crate) fn set_read(&self) -> MessageStatusRequest<'_> {
+    pub(crate) fn set_read(message: Cow<'a, MessageRef>) -> Self {
         MessageStatusRequest {
             messaging_product: "whatsapp",
             status: MessageStatus::Read,
-            message_id: self.message_id(),
+            message_id: match message {
+                Cow::Borrowed(message) => Cow::Borrowed(&message.message_id),
+                Cow::Owned(message) => Cow::Owned(message.message_id),
+            },
             typing_indicator: None,
         }
     }
+}
+
+// ---- Batch impls -----
+
+#[cfg(feature = "batch")]
+impl crate::batch::Requests for UploadMedia {
+    type BatchHandler = UploadMediaHandler;
+
+    type ResponseReference = UploadMediaResponseReference;
+
+    #[inline]
+    fn into_batch_ref(
+        self,
+        batch_serializer: &mut crate::batch::BatchSerializer,
+    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
+        #[derive(Serialize)]
+        struct Payload {
+            messaging_product: &'static str,
+        }
+
+        #[cfg(debug_assertions)]
+        let endpoint = self.request.endpoint.clone();
+
+        let mut request = batch_serializer
+            .format_request(self.request)
+            .attach_file(None, self.media)
+            .json_object_body(Payload {
+                messaging_product: "whatsapp",
+            });
+
+        let name = request.get_name();
+        let reference = reference!(name => MediaUploadResponse => [id]);
+        request.finish()?;
+
+        Ok((
+            UploadMediaHandler {
+                #[cfg(debug_assertions)]
+                endpoint: endpoint.into(),
+            },
+            UploadMediaResponseReference(reference),
+        ))
+    }
+
+    requests_batch_include! {}
+}
+
+#[derive(Debug)]
+#[cfg(feature = "batch")]
+pub struct UploadMediaHandler {
+    #[cfg(debug_assertions)]
+    endpoint: Cow<'static, str>,
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::Handler for UploadMediaHandler {
+    type Responses = Result<String, Error>;
+
+    #[inline]
+    fn from_batch(
+        self,
+        response: &mut crate::batch::BatchResponse,
+    ) -> Result<Self::Responses, crate::batch::ResponseProcessingError> {
+        Ok(response
+            .try_next::<MediaUploadResponse>(
+                #[cfg(debug_assertions)]
+                self.endpoint,
+            )?
+            .map(|r| r.id))
+    }
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::Requests for MediaPayloadSource {
+    type BatchHandler = Option<NullableUploadMediaHandler>;
+
+    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
+
+    #[inline]
+    fn into_batch_ref(
+        self,
+        f: &mut crate::batch::BatchSerializer,
+    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
+        match self {
+            Self::FromBytes(upload_media) => {
+                use crate::batch::Nullable as _;
+
+                let (handler, id) = upload_media.nullable().into_batch_ref(f)?;
+                Ok((Some(handler), MediaRef::Id(id.0)))
+            }
+            Self::FromRef(media_ref) => Ok((None, media_ref)),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if let Self::FromBytes(upload_media) = &self {
+            upload_media.size_hint()
+        } else {
+            (0, Some(0))
+        }
+    }
+
+    requests_batch_include! {}
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::Requests for PendingMediaPayload {
+    type BatchHandler = <MediaPayloadSource as crate::batch::Requests>::BatchHandler;
+
+    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
+
+    #[inline]
+    fn into_batch_ref(
+        self,
+        f: &mut crate::batch::BatchSerializer,
+    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
+        let (h, r) = self.source.into_batch_ref(f)?;
+
+        let request = Self::ResponseReference {
+            media: r,
+            caption: self.caption,
+            filename: self.filename,
+        };
+
+        Ok((h, request))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.source.size_hint()
+    }
+
+    requests_batch_include! {}
+}
+
+#[cfg(feature = "batch")]
+impl StagedInteractiveHeader {
+    fn into_batch_ref(
+        self,
+        batch_serializer: &mut crate::batch::BatchSerializer,
+    ) -> Result<
+        (
+            (NullableUploadMediaHandler, NullableGetMediaInfoHandler),
+            String,
+        ),
+        crate::batch::FormatError,
+    > {
+        // I'm not sure if depending on a request gives the dependent request
+        // the auth. We'd just go from then_nullable into the batch
+
+        use crate::batch::{Nullable as _, Requests as _};
+        let auth = self.upload_media.request.auth.clone();
+
+        let (upload_media_handler, upload_media_ref) = self
+            .upload_media
+            .nullable()
+            .into_batch_ref(batch_serializer)?;
+        let media_id_ref = upload_media_ref.0;
+
+        let mut get_media_info = self.client.get_media_info(&media_id_ref);
+        if let Some(auth) = auth {
+            get_media_info = get_media_info.with_auth(auth)
+        }
+
+        let (get_media_info_handler, media_info_ref) =
+            get_media_info.nullable().into_batch_ref(batch_serializer)?;
+
+        let url_ref = media_info_ref.url();
+
+        Ok(((upload_media_handler, get_media_info_handler), url_ref))
+    }
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::Requests for PendingInteractiveMediaHeader {
+    type BatchHandler = PendingInteractiveMediaHeaderBatchHandler;
+
+    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
+
+    fn into_batch_ref(
+        self,
+        batch_serializer: &mut crate::batch::BatchSerializer,
+    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
+        // Won't work but for completeness
+        let (handler, link) = match self {
+            Self::FromUpload(upload_media) => {
+                let (handlers, url_ref) = upload_media.into_batch_ref(batch_serializer)?;
+
+                (
+                    PendingInteractiveMediaHeaderBatchHandler::FromUpload(handlers),
+                    url_ref,
+                )
+            }
+            Self::FromId(get_media_info) => {
+                use crate::batch::Nullable as _;
+
+                let (handler, url_ref) =
+                    get_media_info.nullable().into_batch_ref(batch_serializer)?;
+                (
+                    PendingInteractiveMediaHeaderBatchHandler::FromId(handler),
+                    url_ref.url(),
+                )
+            }
+            Self::FromLink(link) => (PendingInteractiveMediaHeaderBatchHandler::FromLink, link),
+        };
+
+        Ok((handler, Self::ResponseReference { link }))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::FromUpload(_) => (2, None),
+            Self::FromId(_) => (1, Some(1)),
+            Self::FromLink(_) => (0, Some(0)),
+        }
+    }
+
+    requests_batch_include! {}
+}
+
+#[cfg(feature = "batch")]
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum PendingInteractiveMediaHeaderBatchHandler {
+    FromUpload((NullableUploadMediaHandler, NullableGetMediaInfoHandler)),
+    FromId(NullableGetMediaInfoHandler),
+    FromLink,
+}
+
+#[cfg(feature = "batch")]
+impl crate::batch::Handler for PendingInteractiveMediaHeaderBatchHandler {
+    type Responses = ();
+
+    fn from_batch(
+        self,
+        response: &mut crate::batch::BatchResponse,
+    ) -> Result<Self::Responses, crate::batch::ResponseProcessingError> {
+        match self {
+            Self::FromUpload((first, second)) => {
+                first.from_batch(response)?;
+                second.from_batch(response)?;
+                Ok(())
+            }
+            Self::FromId(id) => {
+                id.from_batch(response)?;
+                Ok(())
+            }
+            Self::FromLink => Ok(()),
+        }
+    }
+}
+
+#[cfg(feature = "batch")]
+impl<'t> crate::batch::Requests for PendingMessagePayload<'t> {
+    type BatchHandler = <PendingContentPayload as crate::batch::Requests>::BatchHandler;
+
+    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
+
+    #[inline]
+    fn into_batch_ref(
+        self,
+        f: &mut crate::batch::BatchSerializer,
+    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
+        let (h, r) = self.content.into_batch_ref(f)?;
+
+        let request = Self::ResponseReference {
+            messaging_product: self.messaging_product,
+            biz_opaque_callback_data: self.biz_opaque_callback_data,
+            to: self.to,
+            context: self.context,
+            content: r,
+        };
+
+        Ok((h, request))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.content.size_hint()
+    }
+
+    requests_batch_include! {}
+}
+
+// --- API Response and Helper Structs ---
+
+/// Media information API response.
+#[derive(Debug, Deserialize)]
+pub struct MediaInfo {
+    #[serde(deserialize_with = "deserialize_url_from_string")]
+    pub(crate) url: Url,
+    // Other fields like mime_type, sha256, file_size, id are omitted as they are not
+    // currently used by the library.
+}
+
+fn deserialize_url_from_string<'de, D>(d: D) -> Result<Url, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = <Cow<'_, str>>::deserialize(d)?;
+    raw.parse().map_err(|err| {
+        <D::Error as serde::de::Error>::custom(format!("Invalid URL '{raw}': {err}"))
+    })
+}
+
+/// Media upload API response.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct MediaUploadResponse {
+    id: String,
 }
 
 // ===== Unified text de/serialization ==== //
@@ -925,16 +984,19 @@ pub(crate) struct TextRequestText {
 
 type OrdinaryText = String;
 
+#[inline]
 pub(crate) fn serialize_text_text<S: Serializer>(v: &Text, ser: S) -> Result<S::Ok, S::Error> {
     let text: &TextRequestText = unsafe { transmute(v) };
     text.serialize(ser)
 }
 
+#[inline]
 pub(crate) fn serialize_ordinary_text<S: Serializer>(v: &Text, ser: S) -> Result<S::Ok, S::Error> {
     let ordinary_text: &OrdinaryText = unsafe { transmute(&v.body) };
     ordinary_text.serialize(ser)
 }
 
+#[inline]
 pub(crate) fn serialize_text_text_opt<S: Serializer>(
     v: &Option<Text>,
     ser: S,
@@ -947,15 +1009,20 @@ pub(crate) fn serialize_text_text_opt<S: Serializer>(
 
 // FIXME: Still can't benefit from AnyField
 impl<'de> Deserialize<'de> for Text {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
+        /// Internal enum for deserializing various forms of a Text object.
         #[derive(Deserialize, Serialize, Debug)]
         #[serde(untagged)]
         enum AnyText {
+            /// E.g., `{ "body": "Hello", "preview_url": false }`
             TextRequest(TextRequest),
+            /// E.g., `{ "text": "Hello", "preview_url": false }`
             TextRequestText(TextRequestText),
+            /// E.g., `"Hello"`
             OrdinaryText(OrdinaryText),
         }
 
@@ -976,18 +1043,25 @@ impl<'de> Deserialize<'de> for Text {
     }
 }
 
-// Interactive action serialization helpers
+/// A helper struct for serializing and deserializing `InteractiveAction`.
+/// The API wraps the action object within a JSON object that has a `type` field
+/// indicating the kind of action. This struct models that wrapper.
 #[derive(Serialize, Deserialize, Debug)]
-struct InteractiveActionRequest<'a, I> {
+struct InteractiveActionWrapper<'a, I> {
+    /// The type of interactive action, represented as a string.
     r#type: Cow<'a, str>,
+    /// The action payload itself.
     action: I,
 }
 
+/// Serializes an `InteractiveAction` enum into the format expected by the API.
+/// It wraps the action in an `InteractiveActionWrapper` with the correct `type` string.
+#[inline]
 pub(crate) fn serialize_interactive_action<S: Serializer>(
     action: &<<InteractiveAction as IntoMessageRequest>::Output as IntoMessageRequestOutput>::Request,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    let r#type = match action {
+    let type_str = match action {
         InteractiveAction::Keyboard(_) => "button",
         InteractiveAction::CatalogDisplay(_) => "catalog_message",
         InteractiveAction::LocationRequest => "location_request_message",
@@ -995,132 +1069,131 @@ pub(crate) fn serialize_interactive_action<S: Serializer>(
         InteractiveAction::ProductList(_) => "product_list",
         InteractiveAction::ProductDisplay(_) => "product",
         InteractiveAction::OptionList(_) => "list",
+        // InteractiveAction::Flow(_) => "flow",
     };
 
-    InteractiveActionRequest {
-        r#type: Cow::Borrowed(r#type),
+    InteractiveActionWrapper {
+        r#type: Cow::Borrowed(type_str),
         action,
     }
     .serialize(serializer)
 }
 
+/// Deserializes an API response into an `InteractiveAction`.
+/// This is primarily used for testing and internal validation, as the library
+/// typically does not receive interactive actions from the API.
+#[inline]
 pub(crate) fn deserialize_interactive_action<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<<InteractiveAction as FromResponse<'de>>::Response, D::Error> {
-    let request = InteractiveActionRequest::<InteractiveAction>::deserialize(deserializer)?;
+    let request = InteractiveActionWrapper::<InteractiveAction>::deserialize(deserializer)?;
     Ok(request.action)
 }
 
+// --- Catalog Display Options Serialization ---
+
+/// A serialization helper for `CatalogDisplayOptions`.
+/// It maps the `thumbnail` field to the `thumbnail_product_retailer_id` field in the JSON payload.
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct CatalogDisplayOptionsRequest<'a> {
+pub(crate) struct CatalogDisplayOptionsHelper<'a> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     thumbnail_product_retailer_id: Option<Cow<'a, str>>,
 }
 
 impl Serialize for CatalogDisplayOptions {
+    #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let prx = CatalogDisplayOptionsRequest {
+        let helper = CatalogDisplayOptionsHelper {
             thumbnail_product_retailer_id: self
                 .thumbnail
                 .as_ref()
                 .map(|p| p.product_retailer_id().into()),
         };
-        prx.serialize(serializer)
+        helper.serialize(serializer)
     }
 }
 
 impl<'a> Deserialize<'a> for CatalogDisplayOptions {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'a>,
     {
-        let prx = CatalogDisplayOptionsRequest::deserialize(deserializer)?;
+        let helper = CatalogDisplayOptionsHelper::deserialize(deserializer)?;
         Ok(Self {
-            thumbnail: prx
+            thumbnail: helper
                 .thumbnail_product_retailer_id
                 .map(ProductRef::from_product_retailer_id),
         })
     }
 }
 
-macro_rules! serde_section {
-    ($($item_name:ident => $ty:path),*) => {
-    paste::paste!(
-        $(
-            #[derive(Serialize, Deserialize)]
-            struct [<$ty Section>] {
-                title: String,
-                $item_name: Vec<$ty>
-            }
-
-            impl serde::Serialize for $crate::message::Section<$ty> {
-                fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-                    where
-                        S: serde::Serializer {
-                    let helper: &[<$ty Section>] = unsafe { std::mem::transmute(self) };
-                    helper.serialize(serializer)
-                }
-            }
-
-            impl<'de> serde::Deserialize<'de> for $crate::message::Section<$ty> {
-                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                    where
-                        D: serde::Deserializer<'de> {
-                    let helper = [<$ty Section>]::deserialize(deserializer)?;
-                    Ok(unsafe { std::mem::transmute::<[<$ty Section>], $crate::message::Section<$ty>>(helper) })
-                }
-            }
-        )*
-    );
-    }
-}
-use crate::message::OptionButton;
-
-serde_section! {
-    product_items => ProductRef,
-    rows => OptionButton
-}
-
 #[derive(Serialize, Debug)]
+#[allow(clippy::owned_cow)] // str might cause reallocation
 pub(crate) struct WebhookConfigRequest<'a> {
+    /// The object type, always "whatsapp_business_account".
     object: &'static str,
-    callback_url: &'a str,
-    verify_token: &'a str,
+    /// The URL to which webhook notifications will be sent.
+    pub callback_url: Cow<'a, String>,
+    /// A token used to verify the authenticity of webhook requests.
+    pub verify_token: Cow<'a, String>,
 }
 
-impl WebhookConfig {
-    pub(crate) fn to_request(&self) -> WebhookConfigRequest<'_> {
+impl<'a> From<Cow<'a, WebhookConfig>> for WebhookConfigRequest<'a> {
+    /// Creates a `WebhookConfigRequest` from a `WebhookConfig`, borrowing data where possible.
+    fn from(config: Cow<'a, WebhookConfig>) -> Self {
+        let (callback_url, verify_token) = match config {
+            Cow::Borrowed(cfg) => (
+                Cow::Borrowed(&cfg.webhook_url),
+                Cow::Borrowed(&cfg.verify_token),
+            ),
+            Cow::Owned(cfg) => (Cow::Owned(cfg.webhook_url), Cow::Owned(cfg.verify_token)),
+        };
         WebhookConfigRequest {
             object: "whatsapp_business_account",
-            callback_url: &self.webhook_url,
-            verify_token: &self.verify_token,
+            callback_url,
+            verify_token,
         }
     }
 }
 
-// FIXME: Make less loose
+/// Represents the possible grant types for an access token request.
+/// Using an enum makes the API safer by preventing invalid string values.
+#[derive(Serialize, Debug, Default, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GrantType {
+    /// Used for exchanging a short-lived token for a long-lived one.
+    FbExchangeToken,
+    /// Standard client credentials flow.
+    #[default]
+    ClientCredentials,
+}
+
+/// Represents the request body for obtaining an access token.
 #[derive(Serialize, Debug, Default)]
 pub(crate) struct AccessTokenRequest<'a> {
-    // app id
+    /// The application's unique ID.
     pub(crate) client_id: &'a str,
-
-    // app secret
+    /// The application's secret key.
     pub(crate) client_secret: &'a str,
+    /// The type of grant being requested.
+    pub(crate) grant_type: GrantType,
 
-    pub(crate) grant_type: &'static str, // fb_exchange_token, client_credentials
-
-    // for onboarding
+    /// The authorization code from the OAuth flow.
+    /// Required for `client_credentials` grant type.
     #[serde(skip_serializing_if = "str::is_empty")]
     pub(crate) code: &'a str,
 
-    // for upgrade
+    /// The token to be exchanged for a long-lived token.
+    /// Required for `fb_exchange_token` grant type.    
     #[serde(skip_serializing_if = "str::is_empty")]
     pub(crate) fb_exchange_token: &'a str,
 }
 
+/// Represents the request to register a phone number.
 #[derive(Serialize)]
 pub(crate) struct RegisterPhoneRequest<'a> {
     messaging_product: &'static str,
@@ -1128,6 +1201,7 @@ pub(crate) struct RegisterPhoneRequest<'a> {
 }
 
 impl<'a> RegisterPhoneRequest<'a> {
+    /// Creates a new request from a 6-digit PIN.
     pub(crate) fn from_pin(pin: &'a str) -> Self {
         Self {
             messaging_product: "whatsapp",
@@ -1136,20 +1210,24 @@ impl<'a> RegisterPhoneRequest<'a> {
     }
 }
 
+/// Request to share a credit line with another WhatsApp Business Account.
 #[derive(Serialize, Debug)]
 pub(crate) struct ShareCreditLineRequest<'a> {
+    /// The ID of the target WhatsApp Business Account.
     pub(crate) waba_id: &'a str,
+    /// The currency of the credit line.
     pub(crate) waba_currency: &'a str,
 }
 
+/// Response from a successful credit line sharing request.
 #[derive(Deserialize, Debug)]
 pub(crate) struct ShareCreditLineResponse {
-    // Save this ID if you want to verify that your credit
-    // line has been shared with the customer.
-    // 58501441721238
+    /// A unique ID for the allocation configuration. This can be used
+    /// to verify that the credit line was shared successfully.
     pub(crate) allocation_config_id: String,
 }
 
+/// A generic wrapper for API responses that are nested under a `whatsapp_business_api_data` key.
 #[derive(Deserialize, Debug)]
 pub(crate) struct WhatsAppBusinessApiData<T> {
     whatsapp_business_api_data: T,
@@ -1163,33 +1241,47 @@ impl<'a> FromResponse<'a> for AppInfo {
     }
 }
 
+// --- Generic Serde String Parsing Helpers ---
+
+/// An enum to help deserialize fields that can be either a raw string
+/// or a fully structured type (like a number or boolean).
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum RawOr<'a, T> {
-    Raw(Cow<'a, str>),
-    Tee(T),
+enum StringOr<'a, T> {
+    String(Cow<'a, str>),
+    Parsed(T),
 }
 
-pub(crate) fn deserialize_str<'de, T, D: Deserializer<'de>>(deserializer: D) -> Result<T, D::Error>
+/// A deserialization helper that can parse a value from a string or accept it directly.
+/// For example, it can deserialize both `"123"` and `123` into an `i32`.
+#[inline]
+pub(crate) fn deserialize_str<'de, T, D>(deserializer: D) -> Result<T, D::Error>
 where
     T: FromStr + Deserialize<'de>,
     T::Err: Display,
+    D: Deserializer<'de>,
 {
-    let v = <RawOr<T>>::deserialize(deserializer)?;
+    let v = <StringOr<T>>::deserialize(deserializer)?;
     match v {
-        RawOr::Raw(s) => T::from_str(&s)
+        StringOr::String(s) => T::from_str(&s)
             .map_err(|err| <D::Error as serde::de::Error>::custom(format!("parsing value: {err}"))),
-        RawOr::Tee(n) => Ok(n),
+        StringOr::Parsed(val) => Ok(val),
     }
 }
 
-pub(crate) fn serialize_str<T, S: Serializer>(v: &T, ser: S) -> Result<S::Ok, S::Error>
+/// A serialization helper that converts a value to its string representation.
+#[inline]
+pub(crate) fn serialize_str<T, S>(v: &T, ser: S) -> Result<S::Ok, S::Error>
 where
     T: ToString,
+    S: Serializer,
 {
+    // FIXME: Inefficient
     ser.serialize_str(&v.to_string())
 }
 
+/// An optional version of `deserialize_from_string`.
+#[inline]
 pub(crate) fn deserialize_str_opt<'de, T, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error>
@@ -1197,42 +1289,19 @@ where
     T: FromStr + Deserialize<'de>,
     T::Err: Display,
 {
-    let v = <Option<RawOr<T>>>::deserialize(deserializer)?;
-    if let Some(v) = v {
-        Ok(match v {
-            RawOr::Raw(s) => Some(T::from_str(&s).map_err(|err| {
-                <D::Error as serde::de::Error>::custom(format!("parsing value: {err}"))
-            })?),
-            RawOr::Tee(n) => Some(n),
-        })
-    } else {
-        Ok(None)
-    }
-}
-
-impl Serialize for ErrorContent {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.errors.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ErrorContent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let errors = <Vec<MetaError>>::deserialize(deserializer)?;
-        Ok(Self { errors })
+    match <Option<StringOr<T>>>::deserialize(deserializer)? {
+        Some(StringOr::String(s)) => T::from_str(&s)
+            .map(Some)
+            .map_err(|err| <D::Error as serde::de::Error>::custom(format!("parsing value: {err}"))),
+        Some(StringOr::Parsed(val)) => Ok(Some(val)),
+        None => Ok(None),
     }
 }
 
 impl Client {
-    /// Handles API responses with consistent error mapping
-    pub(crate) async fn handle_response<T: for<'de> FromResponse<'de>>(
-        // &self,
+    /// Asynchronously handles an API response, parsing success or error cases.
+    #[inline]
+    pub(crate) async fn handle_response<T: FromResponseOwned>(
         response: Response,
         #[cfg(debug_assertions)] endpoint: Cow<'_, str>,
     ) -> Result<T, Error> {
@@ -1247,9 +1316,10 @@ impl Client {
         )
     }
 
-    /// Handles API responses with consistent error mapping
+    /// Synchronously handles a response body, mapping it to a success type `T` or a structured `Error`.
+    /// This is the core logic used by `handle_response
+    #[inline]
     pub(crate) fn handle_response_<'de, T: FromResponse<'de>>(
-        // &self,
         status: StatusCode,
         body: &'de [u8],
         #[cfg(debug_assertions)] endpoint: Cow<'_, str>,
@@ -1276,7 +1346,7 @@ impl Client {
                 .into()),
             }
         } else {
-            Err(Self::handle_not_ok(body)
+            Err(Self::handle_error_response(body)
                 .service(
                     #[cfg(debug_assertions)]
                     endpoint,
@@ -1286,23 +1356,26 @@ impl Client {
         }
     }
 
-    #[inline(always)]
-    fn handle_not_ok(body: &[u8]) -> ServiceErrorKind {
-        // double error
+    /// Parses an error response body from the API.
+    fn handle_error_response(body: &[u8]) -> ServiceErrorKind {
+        /// The API wraps its error object in a top-level `error` key.
         #[derive(Deserialize, Debug)]
-        struct Error {
+        struct ApiErrorWrapper {
             error: MetaError,
         }
-        match serde_json::from_slice::<Error>(body) {
+        match serde_json::from_slice::<ApiErrorWrapper>(body) {
             Ok(structured_error) => ServiceError::api(structured_error.error),
-            Err(structured_parse) => ServiceError::parse(
-                structured_parse.into(),
+            Err(parse_error) => ServiceError::parse(
+                parse_error.into(),
                 String::from_utf8_lossy(body).to_string(),
             ),
         }
     }
 }
 
+// --- Specific Response `FromResponse` Implementations ---
+
+/// Represents a simple success response, e.g., `{"success": true}`.
 #[derive(Deserialize, Debug)]
 pub(crate) struct SuccessStatus {
     pub(crate) success: bool,
@@ -1313,10 +1386,12 @@ impl<'a> FromResponse<'a> for () {
 
     #[inline]
     fn from_response(response: Self::Response) -> Result<Self, ServiceErrorKind> {
-        if !response.success {
-            Err(ServiceError::payload("Operation failed".into()))
-        } else {
+        if response.success {
             Ok(())
+        } else {
+            Err(ServiceError::payload(
+                "Operation failed: API returned success=false".into(),
+            ))
         }
     }
 }
@@ -1324,95 +1399,218 @@ impl<'a> FromResponse<'a> for () {
 impl<'a> FromResponse<'a> for PhantomData<()> {
     type Response = <() as FromResponse<'a>>::Response;
 
+    #[inline]
     fn from_response(response: Self::Response) -> Result<Self, ServiceErrorKind> {
         <() as FromResponse>::from_response(response).map(|_: ()| PhantomData)
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 pub(crate) struct SendMessageResponseContact {
-    wa_id: String,
-    input: String,
+    #[serde(default)]
+    wa_id: Option<String>,
+    // input: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 pub(crate) struct SendMessageResponseMetadata {
     pub(crate) id: String,
-
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(default)]
     message_status: Option<MessageStatus>,
 }
 
-/// Send message API response
+/// Represents the raw API response after sending a message.
 #[derive(Debug, Deserialize)]
 pub(crate) struct SendMessageResponse {
     pub(crate) messages: Vec<SendMessageResponseMetadata>,
+    #[serde(default)]
     pub(crate) contacts: Vec<SendMessageResponseContact>,
 }
 
 impl<'a> FromResponse<'a> for MessageCreate {
     type Response = SendMessageResponse;
 
+    #[inline]
     fn from_response(mut response: Self::Response) -> Result<Self, ServiceErrorKind> {
-        let metadata = response
-            .messages
-            .pop()
-            .ok_or_else(|| ServiceError::payload("Missing message metadata in response".into()))?;
+        let metadata = response.messages.pop().ok_or_else(|| {
+            ServiceError::payload(
+                format!(
+                    "Expected 1 message in response, but received {}",
+                    response.messages.len()
+                )
+                .into(),
+            )
+        })?;
 
-        let (message_id, status) = (metadata.id, metadata.message_status);
+        let (message_id, message_status) = (metadata.id, metadata.message_status);
 
-        let recipient_id = response
+        let recipient = response
             .contacts
             .pop()
-            .ok_or_else(|| ServiceError::payload("Missing message metadata in response".into()))?
-            .wa_id;
+            .and_then(|contact| contact.wa_id.map(IdentityRef::user));
 
         Ok(MessageCreate {
             message: MessageRef {
                 message_id,
-                // FIXME?: I mean it's us.... c'mon
-                sender: None,
-                recipient: Some(IdentityRef::business(recipient_id)),
+                sender: None, // Sender info is not in the response
+                recipient,
             },
-            message_status: status,
+            message_status,
         })
     }
 }
 
 // Not so sure about this... their doc is too obscure
+// TODO: Confirm
+// {
+//   "id": "9876543210",
+//   "retailer_id": "SKU-12345"
+// }
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateProductResponse {
-    pub product: CreatedProduct,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CreatedProduct {
-    #[serde(rename = "product_id")]
-    pub product_id: String,
-
-    #[serde(rename = "retailer_id", default)]
-    pub _retailer_id: Option<String>,
+    pub id: String
 }
 
 impl<'a> FromResponse<'a> for ProductCreate {
     type Response = CreateProductResponse;
 
-    fn from_response(response: Self::Response) -> Result<Self, ServiceErrorKind> {
-        // FIXME
+    fn from_response(create_product_response: Self::Response) -> Result<Self, ServiceErrorKind> {
         Ok(Self {
-            product: MetaProductRef::from_product_id(response.product.product_id),
+            product: MetaProductRef::from_product_id(create_product_response.id),
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use super::*;
+    use crate::catalog::ProductRef;
+    use crate::message::{DocumentExtension, ImageExtension, MediaType, OptionButton, Section};
 
-    use reqwest::{header::AUTHORIZATION, RequestBuilder};
+    use serde_json::json;
 
-    use super::deserialize_str;
-    use crate::message::{DocumentExtension, ImageExtension, MediaType};
+    #[test]
+    fn test_deserialize_from_string_helper() {
+        #[derive(Deserialize, PartialEq, Debug)]
+        struct TestStruct {
+            #[serde(deserialize_with = "deserialize_str")]
+            num: i32,
+        }
+
+        let json_from_string = r#"{"num": "123"}"#;
+        let json_from_number = r#"{"num": 123}"#;
+
+        let from_string: TestStruct = serde_json::from_str(json_from_string).unwrap();
+        let from_number: TestStruct = serde_json::from_str(json_from_number).unwrap();
+
+        assert_eq!(from_string.num, 123);
+        assert_eq!(from_number.num, 123);
+        assert_eq!(from_string, from_number);
+    }
+
+    #[test]
+    fn test_serde_section_product_ref() {
+        let section = Section {
+            title: "My Products".to_string(),
+            items: vec![ProductRef::from_product_retailer_id("prod1")],
+        };
+
+        let serialized = serde_json::to_string(&section).unwrap();
+        let expected_json =
+            r#"{"title":"My Products","product_items":[{"product_retailer_id":"prod1"}]}"#;
+        assert_eq!(serialized, expected_json);
+
+        let deserialized: Section<ProductRef> = serde_json::from_str(expected_json).unwrap();
+        assert_eq!(deserialized.title, section.title);
+        assert_eq!(deserialized.items.len(), 1);
+    }
+
+    #[test]
+    fn test_serde_section_option_button() {
+        let section = Section {
+            title: "My Options".to_string(),
+            items: vec![OptionButton::new("description", "Option 1", "opt1")],
+        };
+
+        let serialized = serde_json::to_string(&section).unwrap();
+        let expected_json = r#"{"title":"My Options","rows":[{"description":"description","title":"Option 1","id":"opt1"}]}"#;
+        assert_eq!(serialized, expected_json);
+
+        let deserialized: Section<OptionButton> = serde_json::from_str(expected_json).unwrap();
+        assert_eq!(deserialized.title, section.title);
+        assert_eq!(deserialized.items.len(), 1);
+    }
+
+    #[test]
+    fn test_handle_response_sync_success() {
+        let body = br#"{"success": true}"#;
+        let result: Result<(), Error> = Client::handle_response_(
+            StatusCode::OK,
+            body,
+            #[cfg(debug_assertions)]
+            "test".into(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_handle_message_create_response() {
+        let body = json!({
+            "messages": [
+                {
+                    "id": "wamid.12345",
+                    "message_status": "accepted"
+                }
+            ],
+            "contacts": [
+                {
+                    "wa_id": "15551234567",
+                    "input": "15551234567"
+                }
+            ]
+        });
+
+        let response: SendMessageResponse = serde_json::from_value(body).unwrap();
+        let message_create = MessageCreate::from_response(response).unwrap();
+
+        assert_eq!(message_create.message.message_id, "wamid.12345");
+        assert_eq!(message_create.message_status, Some(MessageStatus::Accepted));
+        assert_eq!(
+            message_create.message.recipient.unwrap().phone_id(),
+            "15551234567"
+        );
+    }
+
+    #[test]
+    fn test_handle_response_sync_api_error() {
+        let body = br#"{
+            "error": {
+                "message": "Invalid parameter",
+                "type": "OAuthException",
+                "code": 100,
+                "fbtrace_id": "Abc123Def456"
+            }
+        }"#;
+        let result: Result<(), Error> = Client::handle_response_(
+            StatusCode::BAD_REQUEST,
+            body,
+            #[cfg(debug_assertions)]
+            "test".into(),
+        );
+
+        assert!(result.is_err());
+        if let Error::Service(err) = result.unwrap_err() {
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+            if let ServiceErrorKind::Api(api_err) = err.kind {
+                assert_eq!(api_err.error.code, 100);
+                assert_eq!(api_err.error.message.unwrap(), "Invalid parameter");
+            } else {
+                panic!("Expected API error variant");
+            }
+        } else {
+            panic!("Expected Service error");
+        }
+    }
 
     #[test]
     fn media_type() {
@@ -1452,39 +1650,5 @@ mod tests {
             }"#,
         )
         .unwrap();
-    }
-
-    #[test]
-    fn inherit_auth_test() -> Result<(), Box<dyn Error>> {
-        struct Output {
-            request: RequestBuilder,
-        }
-
-        let client = reqwest::Client::new();
-
-        let output = Output {
-            request: client
-                .get("https://example.com")
-                .bearer_auth("A")
-                .bearer_auth("B"),
-        };
-
-        let get;
-        inherit_auth!(output, get);
-
-        let binding = get("https://example.com").build()?;
-        let dep = binding.headers();
-        let binding = output.request.build()?;
-        let main = binding.headers();
-
-        assert_eq!(dep, main);
-        assert_eq!(
-            dep.get_all(AUTHORIZATION)
-                .into_iter()
-                .collect::<Vec<_>>()
-                .len(),
-            2
-        );
-        Ok(())
     }
 }

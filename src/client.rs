@@ -38,35 +38,38 @@
 
 use super::error::Error;
 use crate::{
-    add_auth_to_request,
+    App, CatalogRef, Fields, IdentityRef,
+    ToValue, Waba,
     app::{AppManager, Token},
     catalog::CatalogManager,
     message::{IntoDraft, MediaSource, MediaType, MessageCreate, MessageRef},
     rest::{
-        client::{AccessTokenRequest, MessageRequestOutput, SendMessageResponse},
-        fut_net_op, IntoMessageRequestOutput,
+        self, IntoMessageRequestOutput,
+        client::{
+            AccessTokenRequest, PendingMessagePayload, MessageStatusRequest, SendMessageResponse,
+        },
+        execute_request,
     },
-    to_value,
     waba::WabaManager,
-    App, CatalogRef, Endpoint, IdentityRef, IntoFuture, NullableUnit, SimpleOutput, ToValue, Waba,
 };
 
 use reqwest::{
+    Client as HttpClient, ClientBuilder as HttpClientBuilder, RequestBuilder,
     header::{HeaderMap, HeaderValue},
-    Client as HttpClient, ClientBuilder as HttpClientBuilder, IntoUrl, RequestBuilder,
 };
+use serde::Serialize;
 use std::{
-    borrow::Cow, fmt::Display, marker::PhantomData, mem::transmute, ops::Deref, sync::Arc,
+    borrow::Cow, fmt::Display, future::Future, marker::PhantomData, mem::transmute, ops::Deref,
     time::Duration,
 };
 
 #[cfg(feature = "batch")]
-use crate::{batch::Batch, reference, requests_batch_include};
+use crate::batch::Batch;
 
 /// Default API version for WhatsApp Business API
 const DEFAULT_API_VERSION: &str = "22.0";
 /// Default user agent for the client
-const USER_AGENT: &str = "whatsapp-business-rs/0.1 (Rust)";
+const USER_AGENT: &str = concat!("whatsapp-business-rs/", env!("CARGO_PKG_VERSION"), " (Rust)");
 
 /// The primary entry point for interacting with the **WhatsApp Business API**.
 ///
@@ -116,7 +119,7 @@ const USER_AGENT: &str = "whatsapp-business-rs/0.1 (Rust)";
 /// app settings) is used for each API call to prevent runtime authorization errors.
 #[derive(Clone, Debug)]
 pub struct Client {
-    inner: Arc<InnerClient>,
+    inner: InnerClient,
 }
 
 /// Represents the authentication credentials used to interact with the
@@ -410,6 +413,7 @@ impl Client {
     /// let manager = client.message(sender);
     /// # }
     /// ```
+    #[inline]
     pub fn message<'i, I>(&self, from: I) -> MessageManager<'i>
     where
         I: ToValue<'i, IdentityRef>,
@@ -430,6 +434,7 @@ impl Client {
     /// let catalog = client.catalog("1234567890");
     /// # }
     /// ```
+    #[inline]
     pub fn catalog<'c, C>(&self, c: C) -> CatalogManager<'c>
     where
         C: ToValue<'c, CatalogRef>,
@@ -450,6 +455,7 @@ impl Client {
     /// let waba = client.waba("1234567890");
     /// # }
     /// ```
+    #[inline]
     pub fn waba<'w, W>(&self, w: W) -> WabaManager<'w>
     where
         W: ToValue<'w, Waba>,
@@ -470,6 +476,7 @@ impl Client {
     /// let app = client.app("987654321");
     /// # }
     /// ```
+    #[inline]
     pub fn app<'p, A>(&self, a: A) -> AppManager<'p>
     where
         A: ToValue<'p, App>,
@@ -515,6 +522,7 @@ impl Client {
     ///
     /// See [`Batch`] for more details on adding requests and combining results.
     #[cfg(feature = "batch")]
+    #[inline]
     pub fn batch(&self) -> Batch {
         Batch::new(self)
     }
@@ -571,7 +579,7 @@ impl ClientBuilder {
         self.http = self.http.timeout(duration);
         self
     }
-
+    
     /// Sets the WhatsApp API version to use (e.g. `"19.0"`).
     ///
     /// If you add the `"v"` prefix, it will be removed.
@@ -662,10 +670,10 @@ impl ClientBuilder {
 
         let http_client = self.http.user_agent(USER_AGENT).build()?;
         Ok(Client {
-            inner: Arc::new(InnerClient {
+            inner: InnerClient {
                 http_client,
                 endpoint: Endpoint::new(self.api_version),
-            }),
+            },
         })
     }
 
@@ -740,7 +748,7 @@ impl ClientBuilder {
 /// println!("Message sent with ID: {}", metadata.message_id());
 /// # }
 /// ```
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MessageManager<'i> {
     pub(crate) client: Client,
     pub(crate) from: Cow<'i, IdentityRef>,
@@ -748,6 +756,7 @@ pub struct MessageManager<'i> {
 
 impl<'i> MessageManager<'i> {
     /// Create a new message manager
+    #[inline]
     fn new(from: Cow<'i, IdentityRef>, client: &Client) -> Self {
         Self {
             client: client.clone(),
@@ -800,6 +809,7 @@ impl<'i> MessageManager<'i> {
     /// println!("Media message sent, ID: {}", metadata.message_id());
     /// # Ok(())}
     /// ```
+    #[inline]
     pub fn send<'t, I, D>(&self, to: I, draft: D) -> SendMessage<'t>
     where
         I: ToValue<'t, IdentityRef>,
@@ -845,9 +855,9 @@ impl<'i> MessageManager<'i> {
     where
         T: ToValue<'t, MessageRef>,
     {
-        let to = to.to_value();
+        let payload = MessageStatusRequest::set_typing(to.to_value());
         SetReplying {
-            request: self.client.post(self.base_url()).json(&to.set_typing()),
+            request: self.client.post(self.base_url()).json_object(payload),
             _marker: PhantomData,
         }
     }
@@ -885,9 +895,9 @@ impl<'i> MessageManager<'i> {
     where
         T: ToValue<'t, MessageRef>,
     {
-        let to = to.to_value();
+        let payload = MessageStatusRequest::set_read(to.to_value());
         SetRead {
-            request: self.client.post(self.base_url()).json(&to.set_read()),
+            request: self.client.post(self.base_url()).json_object(payload),
             _marker: PhantomData,
         }
     }
@@ -923,7 +933,7 @@ impl<'i> MessageManager<'i> {
         media_type: MediaType,
         filename: impl Into<Cow<'static, str>>,
     ) -> UploadMedia {
-        self.upload_media_inner(media, media_type.mime_type(), filename)
+        self.prepare_media_upload(media, media_type.mime_type(), filename)
     }
 
     /// Prepares to delete previously uploaded media from WhatsApp servers.
@@ -968,8 +978,8 @@ impl<'i> MessageManager<'i> {
 /// or its `execute().await` method is called.
 #[must_use = "SendMessage does nothing unless you `.await` or `.execute().await` it"]
 pub struct SendMessage<'t> {
-    body: MessageRequestOutput<'t>,
-    request: RequestBuilder,
+    body: PendingMessagePayload<'t>,
+    request: PendingRequest<'static>,
 }
 
 impl SendMessage<'_> {
@@ -987,10 +997,12 @@ impl SendMessage<'_> {
     /// - `auth`: [`Auth`] token to use for this specific request.
     ///
     /// [`Auth`]: crate::client::Auth
+    #[inline]
     pub fn with_auth<'a>(mut self, auth: impl ToValue<'a, Auth>) -> Self {
-        let auth = auth.to_value();
-        self.body = self.body.with_auth(Cow::Borrowed(&*auth));
-        self.request = add_auth_to_request!(auth => self.request);
+        let auth = auth.to_value().into_owned();
+        // We'll add on body later to avoid cloning twice since we won't
+        // self-reference auth.
+        self.request = self.request.auth(auth);
         self
     }
 }
@@ -1022,10 +1034,21 @@ IntoFuture! {
         /// manager.send(&recipient, draft).execute().await?;
         /// # Ok(()) }
         /// ```
-        pub async fn execute(self) -> Result<MessageCreate, Error> {
-            let body = self.body.execute().await?;
-            let request = self.request.json(&body);
-            fut_net_op(request).await
+        #[inline]
+        pub fn execute(mut self) -> impl Future<Output = Result<MessageCreate, Error>> + 't {
+            // TODO: Let's execute as batch if we have media to upload. This would allow
+            // us return static future if batch is enabled.
+
+            // REMEMBER TO ADD AUTH ON BODY
+            if let Some(auth) = &self.request.auth {
+                self.body = self.body.with_auth(Cow::Borrowed(auth.as_ref()))
+            }
+
+            async move {
+                let body = self.body.execute().await?;
+                let request = self.request.json_object(body);
+                execute_request(request).await
+            }
         }
     }
 }
@@ -1036,44 +1059,66 @@ impl<'a> crate::batch::Requests for SendMessage<'a> {
 
     type ResponseReference = SendMessageResponseReference;
 
+    #[inline]
     fn into_batch_ref(
-        self,
-        f: &mut crate::batch::Formatter,
+        mut self,
+        batch_serializer: &mut crate::batch::BatchSerializer,
     ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        let (h, body) = self.body.into_batch_ref(f)?;
-        let mut request = f.add_request(self.request.json(&body))?;
+        // REMEMBER TO ADD AUTH ON BODY
+        if let Some(auth) = &self.request.auth {
+            self.body = self.body.with_auth(Cow::Borrowed(auth.as_ref()))
+        }
+
+        let (h, body) = self.body.into_batch_ref(batch_serializer)?;
+        let request = self.request.json_object(body);
+        #[cfg(debug_assertions)]
+        let endpoint = request.endpoint.clone();
+
+        let mut request = batch_serializer.format_request(request);
         let reference = SendMessageResponseReference {
             reference_id: request.get_name(),
         };
 
-        let _debug = request.finish()?;
+        request.finish()?;
         let handler = SendMessageHandler {
             #[cfg(debug_assertions)]
-            endpoint: _debug.url.into(),
+            endpoint: endpoint.into(),
             dep_handler: h,
         };
 
         Ok((handler, reference))
     }
 
+    #[inline]
     fn into_batch(
-        self,
-        f: &mut crate::batch::Formatter,
+        mut self,
+        batch_serializer: &mut crate::batch::BatchSerializer,
     ) -> Result<Self::BatchHandler, crate::batch::FormatError>
     where
         Self: Sized,
     {
-        let (h, body) = self.body.into_batch_ref(f)?;
-        let request = f.add_request(self.request.json(&body))?;
-        let _debug = request.finish()?;
+        // REMEMBER TO ADD AUTH ON BODY
+        if let Some(auth) = &self.request.auth {
+            self.body = self.body.with_auth(Cow::Borrowed(auth.as_ref()))
+        }
 
-        Ok(SendMessageHandler {
+        let (h, body) = self.body.into_batch_ref(batch_serializer)?;
+        let request = self.request.json_object(body);
+        #[cfg(debug_assertions)]
+        let endpoint = request.endpoint.clone();
+
+        batch_serializer.format_request(request).finish()?;
+
+        let handler = SendMessageHandler {
             #[cfg(debug_assertions)]
-            endpoint: _debug.url.into(),
+            endpoint: endpoint.into(),
             dep_handler: h,
-        })
+        };
+
+        Ok(handler)
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (1 + self.body.size_hint().0, None)
     }
@@ -1100,6 +1145,7 @@ pub struct SendMessageResponseReference {
 
 #[cfg(feature = "batch")]
 impl ToValue<'_, MessageRef> for SendMessageResponseReference {
+    #[inline]
     fn to_value(self) -> Cow<'static, MessageRef> {
         let id = self.reference_id;
         let ref_message_id = reference!(id => SendMessageResponse => [messages[0]] [id]);
@@ -1109,6 +1155,7 @@ impl ToValue<'_, MessageRef> for SendMessageResponseReference {
 
 #[cfg(feature = "batch")]
 impl<'a> ToValue<'a, MessageRef> for &'a SendMessageResponseReference {
+    #[inline]
     fn to_value(self) -> Cow<'static, MessageRef> {
         let id = &self.reference_id;
         let ref_message_id = reference!(id => SendMessageResponse => [messages[0]] [id]);
@@ -1120,22 +1167,23 @@ impl<'a> ToValue<'a, MessageRef> for &'a SendMessageResponseReference {
 pub struct SendMessageHandler<'a> {
     #[cfg(debug_assertions)]
     endpoint: Cow<'static, str>,
-    dep_handler: <MessageRequestOutput<'a> as crate::batch::Requests>::BatchHandler,
+    dep_handler: <PendingMessagePayload<'a> as crate::batch::Requests>::BatchHandler,
 }
 
 #[cfg(feature = "batch")]
 impl crate::batch::Handler for SendMessageHandler<'_> {
     type Responses = Result<MessageCreate, Error>;
 
+    #[inline]
     fn from_batch(
         self,
         response: &mut crate::batch::BatchResponse,
-    ) -> Result<Self::Responses, crate::batch::FromResponseError> {
+    ) -> Result<Self::Responses, crate::batch::ResponseProcessingError> {
         // First read the possible dep requests... all we're interested
         // in is the error and reading past
         self.dep_handler.from_batch(response)?;
 
-        response.handle_next_typical(
+        response.try_next(
             #[cfg(debug_assertions)]
             self.endpoint,
         )
@@ -1147,7 +1195,7 @@ impl crate::batch::Handler for SendMessageHandler<'_> {
 NullableUnit! {SendMessage<'a,>}
 
 SimpleOutput! {
-    SetReplying<'a> => ()
+   {Payload: MessageStatusRequest<'a>} SetReplying<'a> => ()
 }
 
 /// A symbolic reference to the response of a `SetReplying` request.
@@ -1172,13 +1220,14 @@ pub struct SetReplyingResponseReference {
 impl crate::batch::IntoResponseReference for SetReplying<'_> {
     type ResponseReference = SetReplyingResponseReference;
 
+    #[inline]
     fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
         Self::ResponseReference { _priv: () }
     }
 }
 
 SimpleOutput! {
-    SetRead<'a> => ()
+    {Payload: MessageStatusRequest<'a>} SetRead<'a> => ()
 }
 
 /// A symbolic reference to the response of a `SetRead` request.
@@ -1203,6 +1252,7 @@ pub struct SetReadResponseReference {
 impl crate::batch::IntoResponseReference for SetRead<'_> {
     type ResponseReference = SetReadResponseReference;
 
+    #[inline]
     fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
         Self::ResponseReference { _priv: () }
     }
@@ -1216,7 +1266,7 @@ impl crate::batch::IntoResponseReference for SetRead<'_> {
 #[must_use = "UploadMedia does nothing unless you `.await` or `.execute().await` it"]
 #[derive(Debug)]
 pub struct UploadMedia {
-    pub(crate) request: RequestBuilder,
+    pub(crate) request: PendingRequest<'static>,
     pub(crate) media: reqwest::multipart::Part,
 }
 
@@ -1236,7 +1286,7 @@ impl UploadMedia {
     /// [`Auth`]: crate::client::Auth
     #[inline]
     pub fn with_auth<'a>(self, auth: impl ToValue<'a, Auth>) -> Self {
-        <UploadMedia as crate::rest::IntoMessageRequestOutput>::with_auth(self, auth.to_value())
+        <Self as crate::rest::IntoMessageRequestOutput>::with_auth(self, auth.to_value())
     }
 }
 
@@ -1270,8 +1320,8 @@ IntoFuture! {
         /// # Ok(()) }
         /// ```
         #[inline]
-        pub async fn execute(self) -> Result<String, Error> {
-            <UploadMedia as crate::rest::IntoMessageRequestOutput>::execute(self).await
+        pub fn execute(self) -> impl Future<Output = Result<String, Error>> + 'static {
+            <UploadMedia as crate::rest::IntoMessageRequestOutput>::execute(self)
         }
     }
 }
@@ -1294,6 +1344,7 @@ pub struct UploadMediaResponseReference(pub(crate) String);
 
 #[cfg(feature = "batch")]
 impl From<UploadMediaResponseReference> for MediaSource {
+    #[inline]
     fn from(value: UploadMediaResponseReference) -> Self {
         Self::Id(value.0)
     }
@@ -1328,14 +1379,13 @@ pub struct DeleteMediaResponseReference {
 impl crate::batch::IntoResponseReference for DeleteMedia {
     type ResponseReference = DeleteMediaResponseReference;
 
+    #[inline]
     fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
         Self::ResponseReference { _priv: () }
     }
 }
 
-// TODO: This isn't that much to clone around... remove double
-// arc-ing
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct InnerClient {
     http_client: HttpClient,
     endpoint: Endpoint<'static>,
@@ -1347,7 +1397,6 @@ pub(crate) const GRAPH_ENDPOINT: &str = "https://graph.facebook.com";
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Endpoint<'a, const N: usize = 0> {
-    // TODO: For the data it normally contains, this is too much
     api_version: Option<&'static str>,
     parts: [&'a str; N],
 }
@@ -1377,7 +1426,7 @@ impl<'a, const N: usize> Endpoint<'a, N> {
     // construct reqwest error back into the RB.... We'd benefit as
     // as a stream of char to the url parser so we can totally avoid the heap.
     // so sad..
-    #[inline]
+    #[inline(always)]
     pub(crate) fn as_url(&self) -> String /*Cow<'static, str>*/ {
         const GRAPH: usize = GRAPH_ENDPOINT.len();
         const V: usize = "v".len();
@@ -1385,10 +1434,8 @@ impl<'a, const N: usize> Endpoint<'a, N> {
 
         use std::ops::Add;
 
-        // FIXME: We could return GRAPH_ENDPOINT HERE if no version and part
-
         /* "https://graph.facebook.com" / v$api_version $(/ $path)+ */
-        let size = GRAPH
+        let size = GRAPH 
             + if let Some(version) = self.api_version {
                 SLASH
                 + (V + version.len())
@@ -1401,7 +1448,12 @@ impl<'a, const N: usize> Endpoint<'a, N> {
         let mut url = String::with_capacity(size);
 
         /* "https://graph.facebook.com" / v$api_version $(/ $path)+ */
-        url.push_str(GRAPH_ENDPOINT);
+        #[cfg(not(feature = "test-mode"))] {
+            url.push_str(GRAPH_ENDPOINT)            
+        };
+        #[cfg(feature = "test-mode")] {
+            url.push_str(Self::get_base_url_for_test().as_str())
+        };
         if let Some(version) = self.api_version {
             url.push_str("/v");
             url.push_str(version);
@@ -1412,6 +1464,14 @@ impl<'a, const N: usize> Endpoint<'a, N> {
         });
 
         url
+    }
+
+    #[cfg(feature = "test-mode")]
+    fn get_base_url_for_test() -> String {
+        // During tests, we'll set "API_BASE_URL_FOR_TESTING".
+        // Otherwise, it falls back to the production UnRL.
+        std::env::var("API_BASE_URL_FOR_TESTING")
+            .unwrap_or_else(|_| GRAPH_ENDPOINT.into())
     }
 }
 
@@ -1437,6 +1497,211 @@ decl_endpoint! {0 => 1}
 decl_endpoint! {1 => 2}
 // decl_endpoint! {2 => 3}
 
+/// A simple typed definition of an API request.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingRequest<'a, P = (), Q = ()> {
+    pub method: reqwest::Method,
+    pub endpoint: String,
+    pub auth: Option<Cow<'a, Auth>>,
+    pub payload: P,
+    pub query: Q,
+
+    pub client: HttpClient,
+}
+
+#[allow(clippy::from_over_into)]
+impl<'a> Into<RequestBuilder> for PendingRequest<'a> {
+    #[inline]
+    fn into(self) -> RequestBuilder {
+        let mut request = self.client.request(self.method, self.endpoint);
+        request = if let Some(auth) = self.auth {
+            match auth {
+                std::borrow::Cow::Owned(auth) => {
+                    request.header(reqwest::header::AUTHORIZATION, auth)
+                }
+                std::borrow::Cow::Borrowed(auth) => {
+                    request.header(reqwest::header::AUTHORIZATION, auth)
+                }
+            }
+        } else {
+            request
+        };
+
+        request
+    }
+}
+
+impl<'a, P> PendingRequest<'a, P> {
+    // NOTE: It is recommended to have Q which serializes as an object over
+    // the array-tuple shorthand for mental clarity.
+    #[inline]
+    pub fn query<T>(self, query: T) -> PendingRequest<'a, P, T>
+    where
+        T: Serialize,
+    {
+        PendingRequest {
+            method: self.method,
+            endpoint: self.endpoint,
+            auth: self.auth,
+            payload: self.payload,
+            query,
+            client: self.client,
+        }
+    }
+}
+
+impl<'a, P, Q> PendingRequest<'a, P, Q> {
+    #[inline]
+    pub fn auth(mut self, auth: impl ToValue<'a, Auth>) -> Self {
+        self.auth = Some(auth.to_value());
+        self
+    }
+
+    #[inline]
+    pub fn json_object<T>(self, payload: T) -> PendingRequest<'a, JsonObjectPayload<T>, Q>
+    where
+        T: Serialize,
+    {
+        PendingRequest {
+            method: self.method,
+            endpoint: self.endpoint,
+            auth: self.auth,
+            payload: JsonObjectPayload(payload),
+            query: self.query,
+            client: self.client,
+        }
+    }
+
+    #[inline]
+    pub fn json<T>(self, payload: T) -> PendingRequest<'a, T, Q>
+    where
+        T: Serialize,
+    {
+        PendingRequest {
+            method: self.method,
+            endpoint: self.endpoint,
+            auth: self.auth,
+            payload,
+            query: self.query,
+            client: self.client,
+        }
+    }
+
+    // NOTE: This only works if both A and B are going to be serialized
+    // as objects.
+    #[inline]
+    pub fn chain_query<T>(self, query: T) -> PendingRequest<'a, P, ChainQuery<Q, T>>
+    where
+        T: Serialize,
+    {
+        PendingRequest {
+            method: self.method,
+            endpoint: self.endpoint,
+            auth: self.auth,
+            payload: self.payload,
+            query: ChainQuery {
+                a: self.query,
+                b: query,
+            },
+            client: self.client,
+        }
+    }
+}
+
+impl<'a, P, Q> PendingRequest<'a, P, Q>
+where
+    P: Serialize,
+    Q: Serialize,
+{
+    #[inline]
+    pub fn send(self) -> impl Future<Output = reqwest::Result<reqwest::Response>> + 'static {
+        let mut request = self.client.request(self.method, self.endpoint);
+
+        // FIXME: This is not fool-proof but helps solve the problem half-way. Knowing
+        // the domain we're in, a ZST *should* never have a serialize impl which produces
+        // actual data. We should always have to give the API derived data.
+        //
+        // You may think having some EnterRequest trait which transfers the responsibility
+        // of entering the RequestBuilder unto the type would be more appropriate. This would
+        // also help support complex body's like multipart. But this wouldn't seem to solve the
+        // core problem: This problem occurs yet again in the batch module which doesn't
+        // immediately use a RequestBuilder.
+        //
+        // What about Option? That makes us lose whatever type-safety we get. Like in server,
+        // where the fields of a prepared webhook configure request is read. This would've
+        // required an unnecessary unwrap.
+        //
+        // Targetting () our dummy payload with type_id failed too; 'static bound
+        if std::mem::size_of::<Q>() != 0 {
+            request = request.query(&self.query);
+        }
+
+        if std::mem::size_of::<P>() != 0 {
+            request = request.json(&self.payload);
+        }
+
+        request = if let Some(auth) = self.auth {
+            match auth {
+                std::borrow::Cow::Owned(auth) => {
+                    request.header(reqwest::header::AUTHORIZATION, auth)
+                }
+                std::borrow::Cow::Borrowed(auth) => {
+                    request.header(reqwest::header::AUTHORIZATION, auth)
+                }
+            }
+        } else {
+            request
+        };
+
+        request.send()
+    }
+}
+
+// Marker that a payload is a json object
+#[derive(Serialize)]
+#[serde(transparent)]
+pub(crate) struct JsonObjectPayload<T>(pub T);
+
+// NOTE: This only works if both A and B are going to be serialized
+// as objects.
+#[derive(Serialize)]
+pub(crate) struct ChainQuery<A, B> {
+    #[serde(flatten)]
+    pub a: A,
+    #[serde(flatten)]
+    pub b: B,
+}
+
+#[derive(Serialize, Clone)]
+pub(crate) struct FieldsQuery<Field: rest::FieldsTrait> {
+    #[serde(serialize_with = "Fields::serialize")]
+    fields: Fields<Field>,
+}
+
+impl<Field: rest::FieldsTrait> FieldsQuery<Field> {
+    #[inline]
+    pub fn base(mandatory: &'static [&'static str]) -> Self {
+        Self {
+            fields: Fields::new().mandatory(mandatory),
+        }
+    }
+
+    #[inline]
+    pub fn join(mut self, fields: Fields<Field>) -> Self {
+        self.fields.extend(fields.fields);
+        self
+    }
+}
+
+impl<Field: rest::FieldsTrait, I: Into<Fields<Field>>> From<I> for FieldsQuery<Field> {
+    #[inline]
+    fn from(value: I) -> Self {
+        Self {
+            fields: value.into(),
+        }
+    }
+}
+
 impl Client {
     #[inline(always)]
     pub(crate) fn endpoint(&self) -> Endpoint<'static, 0> {
@@ -1448,33 +1713,60 @@ impl Client {
         self.endpoint().join(node)
     }
 
-    // TODO: Since we don't benefit from going to String, we can just reuse this endpoint
-    // in our error message instead of stealing like cavemen
-    //
-    // TODO: Use raw Endpoint
     #[inline]
-    pub(crate) fn post<'a, const N: usize>(&self, url: Endpoint<'a, N>) -> RequestBuilder {
+    pub(crate) fn post<'a, const N: usize>(&self, url: Endpoint<'a, N>) -> PendingRequest<'static> {
         let url = url.as_url();
-        self.inner.http_client.post(url)
+        PendingRequest {
+            method: reqwest::Method::POST,
+            endpoint: url,
+            auth: None,
+            payload: (),
+            query: (),
+            client: self.inner.http_client.clone(),
+        }
     }
 
     #[inline]
-    pub(crate) fn get<'a, const N: usize>(&self, url: Endpoint<'a, N>) -> RequestBuilder {
+    pub(crate) fn get<'a, const N: usize>(&self, url: Endpoint<'a, N>) -> PendingRequest<'static> {
         let url = url.as_url();
-        self.inner.http_client.get(url)
+
+        PendingRequest {
+            method: reqwest::Method::GET,
+            endpoint: url,
+            auth: None,
+            payload: (),
+            query: (),
+            client: self.inner.http_client.clone(),
+        }
     }
 
     #[inline]
-    pub(crate) fn delete<'a, const N: usize>(&self, url: Endpoint<'a, N>) -> RequestBuilder {
+    pub(crate) fn delete<'a, const N: usize>(
+        &self,
+        url: Endpoint<'a, N>,
+    ) -> PendingRequest<'static> {
         let url = url.as_url();
-        self.inner.http_client.delete(url)
+
+        PendingRequest {
+            method: reqwest::Method::DELETE,
+            endpoint: url,
+            auth: None,
+            payload: (),
+            query: (),
+            client: self.inner.http_client.clone(),
+        }
     }
 
     #[inline]
-    pub(crate) fn get_external<U: IntoUrl>(&self, url: U) -> RequestBuilder {
-        // We can't expose the auth
-        // We've set it as default so we gotta override it...
-        self.inner.http_client.get(url).bearer_auth("REDACTED")
+    pub(crate) fn get_external(&self, url: impl Into<String>) -> PendingRequest<'static> {
+        PendingRequest {
+            method: reqwest::Method::GET,
+            endpoint: url.into(),
+            auth: Some(Cow::Owned(Auth::token(""))),
+            payload: (),
+            query: (),
+            client: self.inner.http_client.clone(),
+        }
     }
 }
 
@@ -1486,13 +1778,14 @@ impl Client {
     ) -> Result<Token, Error> {
         let request = self
             .get(self.endpoint().join("oauth/access_token"))
-            .query(&request);
+            .query(request);
 
-        fut_net_op(request).await
+        execute_request(request).await
     }
 }
 
 impl Display for Auth {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
             Auth::Token(token) => f.write_str(&token.0),
@@ -1519,6 +1812,7 @@ pub struct AuthParsedError {
 }
 
 impl From<reqwest::header::InvalidHeaderValue> for Error {
+    #[inline]
     fn from(value: reqwest::header::InvalidHeaderValue) -> Self {
         Error::internal(value.into())
     }
@@ -1527,6 +1821,7 @@ impl From<reqwest::header::InvalidHeaderValue> for Error {
 impl TryFrom<Auth> for reqwest::header::HeaderValue {
     type Error = reqwest::header::InvalidHeaderValue;
 
+    #[inline]
     fn try_from(value: Auth) -> Result<Self, Self::Error> {
         match value {
             Auth::Token { .. } | Auth::Secret { .. } => {
@@ -1545,6 +1840,7 @@ impl TryFrom<Auth> for reqwest::header::HeaderValue {
 impl TryFrom<&Auth> for reqwest::header::HeaderValue {
     type Error = reqwest::header::InvalidHeaderValue;
 
+    #[inline]
     fn try_from(value: &Auth) -> Result<Self, Self::Error> {
         match value {
             Auth::Token { .. } | Auth::Secret { .. } => {
@@ -1561,12 +1857,14 @@ impl TryFrom<&Auth> for reqwest::header::HeaderValue {
 }
 
 impl Display for TokenAuth {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
 impl Display for AppSecret {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
@@ -1660,6 +1958,25 @@ impl<'a> ToValue<'a, IdentityRef> for &'a MessageManager<'a> {
     }
 }
 
+// For tests only
+#[cfg(test)]
+pub(crate) struct TupleArrayShorthand<I>(pub I);
+
+#[cfg(test)]
+impl<I, K, V> Serialize for TupleArrayShorthand<I>
+where
+    for<'a> &'a I: IntoIterator<Item = &'a (K, V)>,
+    K: Serialize,
+    V: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_map(self.0.into_iter().map(|rt| (&rt.0, &rt.1)))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1720,4 +2037,34 @@ mod test {
             1
         ); // not 2;
     }
+
+    #[test]
+    fn query() {
+        let chain_query = ChainQuery {
+            a: (),
+            b: (),
+        };
+        let got = serde_urlencoded::to_string(chain_query).unwrap();
+        assert_eq!(got, "");
+
+        let chain_query = ChainQuery {
+            a: TupleArrayShorthand([("key", "value")]),
+            b: TupleArrayShorthand([("kay", "velue")]),
+        };
+        let got = serde_urlencoded::to_string(chain_query).unwrap();
+        assert_eq!(got, "key=value&kay=velue")
+    }
+
+    #[test]
+    fn auth() {
+        let auth = Auth::token("IHIHF489)!  )_@-I_e(i").parsed().unwrap();
+
+        assert_eq!(auth.to_string(), "IHIHF489)!  )_@-I_e(i");
+
+        let hv: HeaderValue = (&auth).try_into().unwrap();
+        assert_eq!(hv.as_bytes(), b"Bearer IHIHF489)!  )_@-I_e(i");
+
+        let hv: HeaderValue = auth.try_into().unwrap();
+        assert_eq!(hv.as_bytes(), b"Bearer IHIHF489)!  )_@-I_e(i");
+    }    
 }

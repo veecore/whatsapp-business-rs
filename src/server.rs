@@ -94,7 +94,7 @@ use crate::app::ConfigureWebhook;
 use crate::client::AppSecret;
 use crate::message::IntoDraft;
 use crate::rest::server::deserialize_origin;
-use crate::{derive, AnyField, IntoFuture, Timestamp, ToValue, Waba};
+use crate::{Timestamp, ToValue, Waba};
 
 use std::borrow::Cow;
 use std::fmt::{Debug, Display};
@@ -116,7 +116,7 @@ use crate::client::{Client, SendMessage, SetRead, SetReplying};
 use crate::message::Reaction;
 
 const DEFAULT_ENDPOINT: &str = "127.0.0.1:3000";
-const DEFAULT_ROUTE_PATH: &str = "/whatsapp_webhook";
+const DEFAULT_ROUTE_PATH: &str = "/";
 
 /// WhatsApp webhook server
 ///
@@ -250,6 +250,7 @@ impl Server {
 ///
 /// Use [`Serve::configure_webhook`] to associate a pending webhook registration
 /// with this server, which will then be performed automatically when the server starts.
+#[must_use = "Serve does nothing unless you `.await` or `.execute().await` it"]
 pub struct Serve<H> {
     server: Server,
     #[cfg(feature = "incoming_message_ext")]
@@ -259,9 +260,25 @@ pub struct Serve<H> {
 }
 
 impl<H: Handler + 'static> Serve<H> {
+    /// See [`Serve::register_webhook`]
+    #[deprecated(
+        since = "0.3.0",
+        note = "This method is error-prone due to `verify_token` repetition.\
+            Use `register_webhook` for a safer and simpler API."
+    )]
+    pub fn configure_webhook(
+        mut self,
+        verify_token: impl Into<String>,
+        pending: ConfigureWebhook<'static>,
+    ) -> Self {
+        self.pending_register = Some(pending);
+        self.server.config.verify_token = Some(Cow::Owned(verify_token.into()));
+        self
+    }
+
     /// Configures an associated webhook registration task that will run when the server starts.
     ///
-    /// This method takes a `ConfigureWebhook` instance (obtained from [`AppManager::configure_webhook`])
+    /// This method takes a `ConfigureWebhook` instance (obtained from [`configure_webhook`])
     /// that has *not* yet been `.await`ed. When this `Serve` instance is `.await`ed,
     /// the `pending` webhook registration will be executed.
     ///
@@ -271,7 +288,7 @@ impl<H: Handler + 'static> Serve<H> {
     /// # Parameters
     /// - `pending`: A `ConfigureWebhook` instance representing the desired webhook registration.
     ///   **Important**: Do not `.await` this `ConfigureWebhook` instance before passing it here;
-    ///   it should be the builder returned by [`AppManager::configure_webhook`].
+    ///   it should be the builder returned by [`configure_webhook`].
     ///
     /// # Returns
     /// The updated `Serve` instance, ready to be `.await`ed to start the server.
@@ -280,8 +297,10 @@ impl<H: Handler + 'static> Serve<H> {
     /// ```rust,no_run
     /// use whatsapp_business_rs::{Fields, app::{SubscriptionField, WebhookConfig}};
     /// # #[cfg(feature = "incoming_message_ext")] use whatsapp_business_rs::Client;
+    /// # struct __Handler;
+    /// # impl whatsapp_business_rs::WebhookHandler for __Handler {}
     ///
-    /// # async fn example_full(server: whatsapp_business_rs::Server,
+    /// # async fn example_full(serve: whatsapp_business_rs::server::Serve<__Handler>,
     /// # handler: impl whatsapp_business_rs::WebhookHandler + 'static,
     /// # app_manager: whatsapp_business_rs::app::AppManager<'_>)
     /// # -> Result<(), Box<dyn std::error::Error>> {
@@ -298,33 +317,21 @@ impl<H: Handler + 'static> Serve<H> {
     ///     .events(events);
     ///
     /// // 2. Create the server builder and associate the pending registration
-    /// # #[cfg(feature = "incoming_message_ext")]
-    /// # {
-    /// let client = Client::new("YOUR_TOKEN").await?;
-    /// server
-    ///    .serve(handler, client)
-    ///    .configure_webhook("very_secret_token", pending_registration)
+    /// serve
+    ///    .register_webhook(pending_registration)
     ///    .await?; // Await to start server and trigger webhook registration
-    /// # }
     ///
-    /// # #[cfg(not(feature = "incoming_message_ext"))]
-    /// # {
-    /// server
-    ///    .serve(handler)
-    ///    .configure_webhook("very_secret_token", pending_registration)
-    ///    .await?; // Await to start server and trigger webhook registration
-    /// # }
     /// # Ok(()) }
     /// ```
     ///
-    /// [`AppManager::configure_webhook`]: crate::app::AppManager::configure_webhook
-    pub fn configure_webhook(
-        mut self,
-        verify_token: impl Into<String>,
-        pending: ConfigureWebhook<'static>,
-    ) -> Self {
+    /// [`configure_webhook`]: crate::app::AppManager::configure_webhook
+    pub fn register_webhook(mut self, pending: ConfigureWebhook<'static>) -> Self {
+        // We extract the token from the request definition itself.
+        // No more redundant parameters!
+        let token = pending.request.query.a.verify_token.clone();
+        self.server.config.verify_token = Some(token);
+
         self.pending_register = Some(pending);
-        self.server.config.verify_token = Some(verify_token.into());
         self
     }
 
@@ -376,7 +383,8 @@ IntoFuture! {
     [where
         H: Handler + 'static,]
     {
-        pub async fn execute(mut self) -> Result<(), Error> {
+        pub fn execute(mut self) -> impl Future<Output = Result<(), Error>> + 'static {
+        async {
             if self.pending_register.is_none() {
                 self.server
                     .serve_inner(
@@ -418,8 +426,6 @@ IntoFuture! {
                         match reg_result {
                             Ok(Ok(())) => {
                                 // Registration succeeded, now await server
-                                //
-                                // FIXME: Mess with shutdown to reduce overhead?
                                 server_fut.await
                             }
                             Ok(Err(e)) => {
@@ -438,6 +444,7 @@ IntoFuture! {
                     }
                 }
             }
+        }
         }
     }
 }
@@ -461,7 +468,8 @@ pub struct ServerBuilder {
     pub(crate) route_path: String,
     pub(crate) shutdown: Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
     pub(crate) app_secret: Option<AppSecret>,
-    pub(crate) verify_token: Option<String>,
+    #[allow(clippy::owned_cow)]
+    pub(crate) verify_token: Option<Cow<'static, String>>,
 }
 
 impl Default for ServerBuilder {
@@ -635,7 +643,7 @@ impl ServerBuilder {
     ///     .verify_token("MY_SECURE_VERIFICATION_TOKEN");
     /// ```
     pub fn verify_token(mut self, verify_token: impl Into<String>) -> Self {
-        self.verify_token = Some(verify_token.into());
+        self.verify_token = Some(Cow::Owned(verify_token.into()));
         self
     }
 
@@ -740,6 +748,7 @@ pub trait Handler: Send + Sync {
     ///
     /// This is the entry point for all events. The default implementation
     /// routes events to specific handlers based on type.
+    #[inline]
     fn handle(&self, ctx: EventContext, event: Event) -> impl Future<Output = ()> + Send {
         async {
             match event {
@@ -803,6 +812,7 @@ where
     Fut: Future<Output = ()> + Send,
     F: FnOnce(EventContext, Event) -> Fut + Send + Sync + Clone,
 {
+    #[inline]
     fn handle(&self, ctx: EventContext, event: Event) -> impl Future<Output = ()> + Send {
         (self.clone())(ctx, event)
     }
@@ -1097,18 +1107,21 @@ impl ToValue<'_, MessageRef> for &IncomingMessage {
 
 #[cfg(feature = "incoming_message_ext")]
 impl IncomingMessage {
+    #[inline]
     fn as_ref_no_metadata(&self) -> MessageRef {
         self.message.id.clone().into()
     }
 }
 
 impl Display for IncomingMessage {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         <Message as Display>::fmt(&self.message, f)
     }
 }
 
 impl Debug for IncomingMessage {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         <Message as Debug>::fmt(&self.message, f)
     }

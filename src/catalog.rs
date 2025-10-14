@@ -31,13 +31,13 @@
 //!
 //! ## Creating a product
 //! ```rust,no_run
-//! use whatsapp_business_rs::catalog::ProductData;
+//! use whatsapp_business_rs::catalog::{ProductData, Price};
 //!
 //! # async fn example(catalog: &whatsapp_business_rs::catalog::CatalogManager<'_>) {
 //! let product = ProductData::default()
 //!     .name("Rust Programming Book")
 //!     .description("Learn Rust with this comprehensive guide")
-//!     .price(39.99)
+//!     .price(Price(39.99, "USD".into()))
 //!     .currency("USD")
 //!     .image_url("https://example.com/book.jpg")
 //!     .build("rust-book-001");
@@ -49,10 +49,12 @@
 //!
 //! ## Updating a product
 //! ```rust,no_run
+//! use whatsapp_business_rs::catalog::Price;
+//!
 //! # async fn example(catalog: whatsapp_business_rs::catalog::CatalogManager<'_>, product_ref: whatsapp_business_rs::catalog::ProductRef) {
 //! catalog.update_product(&product_ref)
 //!     .name("Updated Product Name")
-//!     .price(4999)
+//!     .price(Price(4999.0, "USD".into()))
 //!     .availability("in stock")
 //!     .await
 //!     .unwrap();
@@ -64,17 +66,13 @@
 //! [`Product`]: crate::catalog::Product
 //! [`ProductData`]: crate::catalog::ProductData
 
-use crate::{
-    rest::{client::CreateProductResponse, BuilderInto},
-    to_value,
-    waba::Catalog,
-    Builder, CatalogRef, Endpoint, SimpleOutput, SimpleStreamOutput, ToValue, Update,
-};
+use crate::rest::client::{CreateProductResponse, deserialize_str_opt};
+use crate::{CatalogRef, ToValue, Update, client::FieldsQuery, rest::BuilderInto, waba::Catalog};
 use std::{borrow::Cow, ops::Deref};
 
-use crate::{client::Client, derive, Fields};
-use base64::engine::general_purpose::URL_SAFE;
+use crate::{Fields, client::Client};
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE;
 use serde::{Deserialize, Serialize};
 
 /// Manager for WhatsApp Business product catalogs.
@@ -124,7 +122,7 @@ use serde::{Deserialize, Serialize};
 /// [`CatalogManager::update_product()`]: crate::catalog::CatalogManager::update_product
 /// [`CatalogManager::update_product_by_id()`]: crate::catalog::CatalogManager::update_product_by_id
 /// [`ListProduct::into_stream()`]: crate::catalog::ListProduct::into_stream
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CatalogManager<'c> {
     client: Client,
     catalog: Cow<'c, CatalogRef>,
@@ -152,11 +150,11 @@ impl<'c> CatalogManager<'c> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use whatsapp_business_rs::catalog::{ProductData, CatalogManager, RawProduct};
+    /// # use whatsapp_business_rs::catalog::{ProductData, Price, CatalogManager, RawProduct};
     /// # async fn example_create_product(catalog: CatalogManager<'_>) -> Result<(), Box<dyn std::error::Error>> {
     /// let product_data = ProductData::default()
     ///      .name("Fancy Widget Pro")
-    ///      .price(9999)
+    ///      .price(Price(9999.0, "USD".into()))
     ///      .currency("USD")
     ///      .description("A high-quality widget for all your needs.")
     ///      .build("fancy-widget-pro-sku"); // Your unique retailer ID
@@ -169,7 +167,7 @@ impl<'c> CatalogManager<'c> {
     /// [`CreateProduct`]: crate::catalog::CreateProduct
     pub fn create_product(&self, product: RawProduct) -> CreateProduct {
         let url = self.endpoint("products");
-        let request = self.client.post(url).json(&product);
+        let request = self.client.post(url).json_object(product);
 
         CreateProduct { request }
     }
@@ -210,7 +208,10 @@ impl<'c> CatalogManager<'c> {
     /// [`ListProduct`]: crate::catalog::ListProduct
     pub fn list_products(&self) -> ListProduct {
         let url = self.endpoint("products");
-        let request = self.client.get(url);
+        let request = self
+            .client
+            .get(url)
+            .query(FieldsQuery::base(&["id", "retailer_id"]));
 
         ListProduct { request }
     }
@@ -229,13 +230,13 @@ impl<'c> CatalogManager<'c> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use whatsapp_business_rs::catalog::{CatalogManager, MetaProductRef};
+    /// # use whatsapp_business_rs::catalog::{CatalogManager, MetaProductRef, Price};
     /// # async fn example_update_by_meta_id(catalog: &CatalogManager<'_>) -> Result<(), Box<dyn std::error::Error>> {
     /// let product_meta_ref = MetaProductRef::from("123456789012345"); // Meta's product ID
     ///
     /// catalog.update_product_by_id(&product_meta_ref)
     ///      .name("Super Shiny Widget (Updated)")
-    ///      .price(8999) // New price
+    ///      .price(Price(8999.0, "USD".into()))// New price
     ///      .currency("USD")
     ///      .availability("in stock")
     ///      .await?; // Await to send the update
@@ -255,7 +256,7 @@ impl<'c> CatalogManager<'c> {
     {
         let product = product.to_value();
         let url = self.client.a_node(&product.product_id);
-        let request = self.client.post(url);
+        let request = self.client.post(url).json_object(ProductData::default());
         Update::new(request)
     }
 
@@ -273,13 +274,13 @@ impl<'c> CatalogManager<'c> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use whatsapp_business_rs::catalog::{CatalogManager, ProductRef};
+    /// # use whatsapp_business_rs::catalog::{CatalogManager, ProductRef, Price};
     /// # async fn example_update_by_retailer_id(catalog: &CatalogManager<'_>) -> Result<(), Box<dyn std::error::Error>> {
     /// let product_retailer_ref = ProductRef::from("my-unique-shirt-sku"); // Your internal retailer ID
     ///
     /// catalog.update_product(&product_retailer_ref)
     ///      .name("Premium T-Shirt (New Season)")
-    ///      .price(12999) // New price
+    ///      .price(Price(12999.0, "USD".into())) // New price
     ///      .currency("EUR")
     ///      .availability("out of stock")
     ///      .await?; // Await to send the update
@@ -303,7 +304,7 @@ impl<'c> CatalogManager<'c> {
         let product_uri = format!("catalog:{catalog_id}:{retailer_id_b64}");
 
         let url = self.client.a_node(&product_uri);
-        let request = self.client.post(url);
+        let request = self.client.post(url).json_object(ProductData::default());
         Update::new(request)
     }
 
@@ -311,7 +312,7 @@ impl<'c> CatalogManager<'c> {
 }
 
 SimpleStreamOutput! {
-    ListProduct => Product
+    {Query: FieldsQuery<ProductDataField>} ListProduct => Product
 }
 
 impl ListProduct {
@@ -343,13 +344,13 @@ impl ListProduct {
     /// [`Fields`]: crate::Fields
     /// [`ProductDataField`]: crate::catalog::ProductDataField
     pub fn metadata(mut self, metadata: Fields<ProductDataField>) -> Self {
-        self.request = metadata.into_request(self.request, ["id", "retailer_id"]);
+        self.request.query = self.request.query.join(metadata);
         self
     }
 }
 
 SimpleOutput! {
-    CreateProduct => ProductCreate
+   {Payload: RawProduct} CreateProduct => ProductCreate
 }
 
 /// A symbolic reference to the response of a `CreateProduct` request.
@@ -441,8 +442,13 @@ impl RawProduct {
 derive! {
     /// Core fields of a WhatsApp product.
     ///
-    /// Use [`ProductData::default()]` or [`RawProduct::builder()`] to build up product attributes.
+    /// Use [`ProductData::default()`] or [`RawProduct::builder()`] to build up product attributes.
     /// These fields define what a user sees when browsing your catalog.
+    ///
+    /// # API Stability
+    /// **Note**: This struct's fields are based on available documentation and may not
+    /// perfectly align with the live WhatsApp API in all cases. As the underlying API
+    /// evolves, this struct is subject to change and should not be considered stable.
     #[derive(#Update, #Fields, #Builder, PartialEq, Serialize, Deserialize, Debug, Default)]
     #[non_exhaustive]
     pub struct ProductData {
@@ -462,15 +468,15 @@ derive! {
         /// Product category (arbitrary string)
         #[serde(skip_serializing_if = "Option::is_none", default)]
         pub category: Option<String>,
-        /// Price (as float)
+        /// Price
         #[serde(skip_serializing_if = "Option::is_none", default)]
-        pub price: Option<f64>,
-        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub price: Option<Price>,
+        #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_str_opt", default)]
         pub sale_price: Option<f64>,
         /// Currency code (ISO 4217)
         #[serde(skip_serializing_if = "Option::is_none", default)]
         pub currency: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none", default)]
+        #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_str_opt", default)]
         pub quantity_to_sell_on_facebook: Option<usize>,
         /// Product brand
         #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -494,7 +500,46 @@ derive! {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         pub delivery_category: Option<String>,
         /// For variants
+        #[serde(skip_serializing_if = "Option::is_none", default)]
         pub item_group_id: Option<String>,
+    }
+}
+
+#[derive(PartialEq, Clone, Debug)]
+pub struct Price(pub f64, pub String);
+
+impl Price {
+    pub fn new(amount: f64, currency: impl Into<String>) -> Self {
+        Self(amount, currency.into())
+    }
+}
+
+impl Serialize for Price {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(&format_args!("{:.2} {}", self.0, self.1))
+    }
+}
+
+impl<'de> Deserialize<'de> for Price {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let repr = <Cow<str>>::deserialize(deserializer)?;
+        let (price, currency) = repr.trim().split_once(" ").ok_or_else(|| {
+            <D::Error as serde::de::Error>::custom(format!(
+                "Error parsing price: {repr}: split_once failed"
+            ))
+        })?;
+
+        let price = price.parse().map_err(|err| {
+            <D::Error as serde::de::Error>::custom(format!("Error parsing price: {repr}: {err}"))
+        })?;
+
+        Ok(Self(price, currency.into()))
     }
 }
 
@@ -704,7 +749,7 @@ impl<'m> ToValue<'m, MetaProductRef> for &'m CreateProductResponseReference {
     #[inline]
     fn to_value(self) -> Cow<'static, MetaProductRef> {
         let id = &self.reference_id;
-        let ref_id = crate::reference!(id => CreateProductResponse => [product] [product_id]);
+        let ref_id = reference!(id => CreateProductResponse => [id]);
         Cow::Owned(MetaProductRef { product_id: ref_id })
     }
 }
@@ -713,7 +758,7 @@ impl ToValue<'_, MetaProductRef> for CreateProductResponseReference {
     #[inline]
     fn to_value(self) -> Cow<'static, MetaProductRef> {
         let id = self.reference_id;
-        let ref_id = crate::reference!(id => CreateProductResponse => [product] [product_id]);
+        let ref_id = reference!(id => CreateProductResponse => [id]);
         Cow::Owned(MetaProductRef { product_id: ref_id })
     }
 }

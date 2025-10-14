@@ -52,19 +52,17 @@
 //! # }
 //! ```
 
-use percent_encoding::NON_ALPHANUMERIC;
 use reqwest::{
-    header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE},
+    Method, StatusCode,
     multipart::{Form, Part},
-    Method, StatusCode, Url,
 };
-use serde::{ser::SerializeSeq as _, Deserialize, Serialize, Serializer};
-use serde_json::value::RawValue;
-use std::{borrow::Cow, collections::HashMap, fmt::Display, marker::PhantomData};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeSeq as _};
+use std::{borrow::Cow, fmt::Display, marker::PhantomData};
 
 use crate::{
-    add_auth_to_request, client::Endpoint, fut_net_op, Auth, Client, FromResponseOwned, IntoFuture,
-    ToValue,
+    Auth, Client, FromResponseOwned, ToValue,
+    client::{Endpoint, JsonObjectPayload, PendingRequest},
+    rest::execute_multipart_request,
 };
 
 /// `Batch` is the entry point for grouping multiple requests to be sent as a single batch.
@@ -177,6 +175,7 @@ impl Batch {
     ///
     /// This assumes the `Client`'s base URL is the host and everything after that
     /// is the relative path.
+    #[inline]
     fn make_url_relative(url: &str) -> &str {
         // Find the position of the third slash
         let mut slash_count = 0;
@@ -197,7 +196,7 @@ impl Batch {
 macro_rules! tri_batch {
     ($expr:expr) => {
         match $expr {
-            Err(err) => return BatchExecute::err(err),
+            Err(err) => return BatchExecute::from_err(err),
             Ok(ok) => ok,
         }
     };
@@ -240,6 +239,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
+    #[inline]
     pub fn include<R>(self, r: R) -> Batch<Rs::Include<R>> {
         Batch {
             requests: self.requests.include(r),
@@ -280,6 +280,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
+    #[inline]
     pub fn include_iter<I, R>(self, iter: I) -> Batch<Rs::Include<Many<I::IntoIter>>>
     where
         I: IntoIterator<Item = R>,
@@ -287,40 +288,50 @@ where
         self.include(Many::new(iter.into_iter()))
     }
 
+    /// Unwraps the Batch, returning the underlying requests.
+    pub fn into_inner(self) -> Rs {
+        self.requests
+    }
+
     /// Consumes the `Batch` builder and prepares it for execution.
     ///
     /// This method formats all included requests into a single multipart form
     /// payload and returns an `ExecuteBatch` future. You must `.await` this
     /// future to send the request.
+    #[inline]
     pub fn execute(self) -> BatchExecute<Rs::BatchHandler> {
-        let (size, _) = self.requests.size_hint();
+        let (size_hint, _) = self.requests.size_hint();
 
         // Use a conservative heuristic of 256 bytes per request for pre-allocation.
         const AVERAGE_REQ_SIZE: usize = 256;
-        let out = Vec::with_capacity(size * AVERAGE_REQ_SIZE);
+        let json_buffer = Vec::with_capacity(size_hint * AVERAGE_REQ_SIZE);
 
-        let mut binding = serde_json::Serializer::new(out);
-        let serializer = tri_batch!(binding
-            .serialize_seq(Some(size)) // Useless to serde_json
-            .map_err(FormatError::Serialization));
+        // Set up the JSON serializer.
+        let mut serializer = serde_json::Serializer::new(json_buffer);
+        let seq_serializer = tri_batch!(
+            serializer
+                .serialize_seq(Some(size_hint))
+                .map_err(FormatError::Serialization)
+        );
 
-        let mut f = Formatter::new(serializer);
-        let handler = tri_batch!(self.requests.into_batch(&mut f));
+        // Use the dedicated serializer to format the batch requests.
+        let mut batch_serializer = BatchSerializer::new(seq_serializer);
+        let handler = tri_batch!(self.requests.into_batch(&mut batch_serializer));
 
-        // Finalize the serialization and handle any potential errors.
-        let files = tri_batch!(f.finish_into_files());
+        // Finalize the serialization and retrieve the JSON bytes and attached files.
+        let files = tri_batch!(batch_serializer.finish());
+        let json_bytes = serializer.into_inner();
 
-        let batch_bytes = binding.into_inner();
+        // Create the multipart parts.
+        let batch_part = Part::bytes(json_bytes);
 
-        let batch_part = Part::bytes(batch_bytes);
-
-        BatchExecute::from_parts(batch_part, files, handler, self.client)
+        BatchExecute::build(batch_part, files, handler, self.client)
     }
 }
 
 /// Internal state for a pending batch execution.
 struct BatchExecuteState<Handler> {
-    request: reqwest::RequestBuilder,
+    request: PendingRequest<'static>,
     /// The multipart form containing the JSON batch payload and any attached files.
     form: Form,
     /// The handler responsible for parsing the API's response.
@@ -333,24 +344,34 @@ struct BatchExecuteState<Handler> {
 /// and parse the top-level response. It is created by calling `.execute()` on a `Batch`.
 #[must_use = "ExecuteBatch does nothing unless you `.await` or `.execute().await` it"]
 pub struct BatchExecute<Handler> {
+    // Using Result here allows us to capture any errors that occur during
+    // the build phase and report them only when executed.
     state: Result<BatchExecuteState<Handler>, FormatError>,
 }
 
-// FIXME: The default auth on different clients won't work here
 impl<Handler> BatchExecute<Handler> {
-    /// Internal constructor to create an `ExecuteBatch` from its component parts.
-    fn from_parts(batch: Part, files: Vec<Part>, handler: Handler, client: Client) -> Self {
-        const BATCH: &str = "batch";
-        let mut form = Form::new().part(BATCH, batch);
+    /// Internal constructor to create a `BatchExecute` from its component parts.
+    #[inline]
+    fn build(
+        batch_part: Part,
+        files: Vec<(Cow<'static, str>, Part)>,
+        handler: Handler,
+        client: Client,
+    ) -> Self {
+        const BATCH_FIELD_NAME: &str = "batch";
 
-        for (i, file) in files.into_iter().enumerate() {
-            let name = Formatter::get_binary_name(i);
-            form = form.part(name, file);
+        // Initialize the form with the main JSON batch payload.
+        let mut form = Form::new().part(BATCH_FIELD_NAME, batch_part);
+
+        // Add all attached files to the form with their specified names.
+        for (name, file_part) in files {
+            form = form.part(name, file_part);
         }
 
-        const ROOT: Endpoint<'static> = Endpoint::without_version();
+        // The batch API endpoint is at the root of the graph API.
+        const ROOT_ENDPOINT: Endpoint<'static> = Endpoint::without_version();
+        let request = client.post(ROOT_ENDPOINT);
 
-        let request = client.post(ROOT);
         let me = Self {
             state: Ok(BatchExecuteState {
                 request,
@@ -358,12 +379,13 @@ impl<Handler> BatchExecute<Handler> {
                 handler,
             }),
         };
+
         // By default, headers are not included in the response.
         me.include_headers(false)
     }
 
     /// Internal constructor for a failed batch creation.
-    fn err(err: FormatError) -> Self {
+    fn from_err(err: FormatError) -> Self {
         Self { state: Err(err) }
     }
 
@@ -386,17 +408,18 @@ impl<Handler> BatchExecute<Handler> {
     /// # }
     /// ```
     pub fn include_headers(mut self, include_headers: bool) -> Self {
-        const INCLUDE_HEADERS: &str = "include_headers";
+        const INCLUDE_HEADERS_FIELD: &str = "include_headers";
 
-        self.state = self.state.map(|mut state| {
+        if let Ok(mut state) = self.state {
             state.form = state.form.text(
-                INCLUDE_HEADERS,
+                INCLUDE_HEADERS_FIELD,
                 if include_headers { "true" } else { "false" },
             );
-            state
-        });
-
-        self
+            self.state = Ok(state);
+            self
+        } else {
+            self
+        }
     }
 
     /// Overrides the default authentication for the entire batch request.
@@ -405,45 +428,50 @@ impl<Handler> BatchExecute<Handler> {
     /// This is different from calling `.with_auth()` on an individual request
     /// before adding it to the batch.
     pub fn with_auth<'a>(mut self, auth: impl ToValue<'a, Auth>) -> Self {
-        // Using the access_token field means getting a String... but with
-        // the normal bearer way, we get to reuse the possibly parsed auth
-
-        self.state = self.state.map(|mut state| {
-            state.request = add_auth_to_request!(auth.to_value() => state.request);
-            state
-        });
-
+        if let Ok(state) = &mut self.state {
+            state.request.auth = Some(Cow::Owned(auth.to_value().into_owned()));
+        }
         self
     }
 }
 
 IntoFuture! {
-    impl<H> BatchExecute<H>
-    [
-    where
-        H: Handler + Send + 'static,
-        ]
-    {
-        /// Sends the batch request and returns a `BatchOutput`.
-        ///
-        /// This method performs the network operation and a preliminary parsing of the
-        /// top-level batch response JSON. The returned `BatchOutput` can then be used
-        /// to parse the individual results using `.flatten()`.
-        pub async fn execute(self) -> Result<BatchOutput<H>, crate::Error> {
-            let state = self.state?;
-            // Meta's batch response quotes the inner JSON body, forcing us to
-            // deserialize and potentially re-allocate, rather than borrowing
-            // slices(bytes::Bytes with no life issue) from the original response body.
+impl<H> BatchExecute<H>
+[
+where
+    H: Handler + Send + 'static,
+    ]
+{
+    /// Sends the batch request and returns a `BatchOutput`.
+    ///
+    /// This method performs the network operation and a preliminary parsing of the
+    /// top-level batch response JSON. The returned `BatchOutput` can then be used
+    /// to parse the individual results using `.flatten()`.
+    pub fn execute(self) -> impl Future<Output = Result<BatchOutput<H>, crate::Error>> + 'static {
+        #[cfg(debug_assertions)]
+        let handle = async |endpoint: String, response| {
+            Client::handle_response(response, endpoint.into()).await
+        };
 
-            // TODO: Use the static GRAPH_ENDPOINT for debug
-            let response: Vec<Option<AResponse>> = fut_net_op(state.request.multipart(state.form)).await?;
+        #[cfg(not(debug_assertions))]
+        let handle = async |response| {
+            Client::handle_response(response).await
+        };
+
+        async move {
+            let state = self.state?;
+            let response
+                = execute_multipart_request(state.request, state.form, handle).await?;
+
 
             Ok(BatchOutput::from_parts(state.handler, response))
         }
     }
 }
+}
 
-// --- Traits ---
+// SECTION: Traits
+// ================
 
 /// A trait for objects that can be included in a batch request.
 ///
@@ -505,26 +533,27 @@ pub trait Requests {
     type ResponseReference;
 
     /// Formats the request and produces its handler and response reference.
-    ///
-    /// This is the core method for serialization within a batch, called internally
-    /// by `Batch::execute`.
     fn into_batch_ref(
         self,
-        f: &mut Formatter,
+        batch_serializer: &mut BatchSerializer,
     ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError>;
 
-    /// Formats the request(s) and writes them to the batch `Formatter`.
+    /// Formats the request(s) and writes them to the [`BatchSerializer`].
     ///
     /// This method is responsible for serializing the request's JSON representation
     /// and handling any binary attachments.
     //
     // Implementation NOTE: An optimized version should be implemented to avoid
     // bloating request with unused request names
-    fn into_batch(self, f: &mut Formatter) -> Result<Self::BatchHandler, FormatError>
+    #[inline]
+    fn into_batch(
+        self,
+        batch_serializer: &mut BatchSerializer,
+    ) -> Result<Self::BatchHandler, FormatError>
     where
         Self: Sized,
     {
-        let (h, _) = self.into_batch_ref(f)?;
+        let (h, _) = self.into_batch_ref(batch_serializer)?;
         Ok(h)
     }
 
@@ -533,11 +562,6 @@ pub trait Requests {
     /// This is typically a nested tuple, like `(Self, R)`, which allows the compiler
     /// to track the sequence of requests.
     type Include<R>;
-    // FIXME: Maybe this shouldn't be assoc... there's possibility
-    // of many join techniques for one type. With macro, we may
-    // make tuples join 'flatly' upto a certain amount...
-    // Batch may join as (Batch, R) and as Batch<Before + R> though the former
-    // seems more intuitive for unpacking
 
     /// Joins this request group with another.
     fn include<R>(self, r: R) -> Self::Include<R>;
@@ -545,6 +569,7 @@ pub trait Requests {
     /// Provides a hint about the number of individual requests contained within this object.
     ///
     /// This is used for pre-allocating capacity to improve performance.
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (1, None)
     }
@@ -630,6 +655,7 @@ pub trait Requests {
     /// # Ok(())
     /// # }
     /// ```
+    #[inline]
     fn then<R, F>(self, f: F) -> Then<Self, R, F>
     where
         Self: Sized,
@@ -655,14 +681,103 @@ pub trait Requests {
     /// request. The parser will then correctly interpret `null` as `Ok(None)` and continue
     /// processing the rest of the batch without issue.
     ///
-    /// **This is the recommended and safest method for creating dependent requests.**    
-    fn then_nullable<R, F>(self, f: F) -> Then<Self::Nullable, R, F>
+    /// **This is the recommended and safest method for creating dependent requests.**
+    #[inline]
+    fn then_nullable<R, F>(self, f: F) -> ThenNullable<Self, R, F>
     where
         Self: Nullable + Sized,
         F: FnOnce(Self::ResponseReference) -> R,
         R: Requests,
     {
         Then::new(self.nullable(), f)
+    }
+
+    /// Transforms the successful output of a request after execution.
+    ///
+    /// Unlike `.then()`, which chains requests together *before* they are sent, `map`
+    /// is used for post-processing the *result* of a request after the batch has
+    /// been successfully executed and its response parsed.
+    ///
+    /// The closure `f` receives the final output of the request (typically a `Result`)
+    /// and can transform it into any other type `U`. This allows you to adapt the
+    /// response to your application's needs, perform side-effects like logging, or
+    /// forward the result to other routines.
+    ///
+    /// ## Key Differences from `.then()`
+    ///
+    /// - **Execution Time**: `.map()` runs *after* the API call. `.then()` runs *before*,
+    ///   during the construction of the batch request.
+    /// - **Closure Input**: The closure for `.map()` receives the actual, parsed response
+    ///   data. The closure for `.then()` receives a `ResponseReference`, a symbolic
+    ///   placeholder for a future result.
+    /// - **Purpose**: Use `.map()` to process a response. Use `.then()` to create a new
+    ///   request that depends on a previous one within the same batch.
+    ///
+    /// ### Behavior on Batch Failure
+    ///
+    /// It's important to understand how `map` interacts with the two possible types of errors:
+    ///
+    /// - **Request-Level Error**: If the overall batch API call is successful but the
+    ///   *specific request within it fails* (e.g., sending to an invalid number),
+    ///   the `result` passed to your closure will be `Err(Error)`. **Your `.map()`
+    ///   closure will still run.**
+    ///
+    /// - **Batch-Level Error**: If the entire batch request fails catastrophically
+    ///   (e.g., due to a network error or invalid credentials), the top-level
+    ///   `.execute()` method will return an `Err`. In this scenario, **your `.map()`
+    ///   closure will not run at all.**
+    ///
+    /// This is especially crucial for patterns involving side-effects. For example, if
+    /// you're sending a result to a channel, the receiving end must handle the channel
+    /// being closed unexpectedly (`RecvError`), as this is the signal that a batch-level
+    /// error occurred and the closure was dropped before it could execute.
+    ///
+    /// # Example: Sending a result to a channel
+    ///
+    /// This example shows how to send a message and, upon a successful response,
+    /// forward the resulting message ID to another part of the application via a channel.
+    /// The final output of the request itself is mapped to `()`, as we've already
+    /// handled the data we care about.
+    ///
+    /// ```rust,no_run
+    /// # use whatsapp_business_rs::{Client, Error, batch::Requests, message::MessageCreate};
+    /// # use std::sync::mpsc::channel;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = Client::new("YOUR_API_KEY").await?;
+    /// // Create a channel to send results to another part of the application.
+    /// let (tx, rx) = channel::<String>();
+    ///
+    /// let request = client.message("SENDER")
+    ///     .send("RECIPIENT", "Hello from the batch!")
+    ///     .map(move |result: Result<MessageCreate, Error>| {
+    ///         // This closure runs after the request is executed and parsed.
+    ///         if let Ok(response) = result {
+    ///             println!("Successfully sent message, forwarding ID...");
+    ///             // Send the ID to another thread.
+    ///             tx.send(response.message_id().to_string()).unwrap();
+    ///         }
+    ///         // The original result is consumed and we return unit `()` instead.
+    ///         ()
+    ///     });
+    ///
+    /// // Execute the request. The output for this request in the batch will now be `()`.
+    /// let _ = client.batch().include(request).execute().await?;
+    ///
+    /// // The other part of the app can now receive the message ID.
+    /// let received_id = rx.try_recv().unwrap();
+    /// assert!(!received_id.is_empty());
+    /// println!("Received message ID via channel: {}", received_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[inline]
+    fn map<U, F>(self, f: F) -> Map<Self, F>
+    where
+        F: FnOnce(<Self::BatchHandler as Handler>::Responses) -> U,
+        Self: Sized,
+        Self::BatchHandler: Handler,
+    {
+        Map::new(self, f)
     }
 }
 
@@ -684,8 +799,10 @@ pub trait Handler {
     /// This method consumes one or more items from the `BatchResponse` iterator
     /// and deserializes them into the `Responses` type.
     #[allow(clippy::wrong_self_convention)]
-    fn from_batch(self, response: &mut BatchResponse)
-        -> Result<Self::Responses, FromResponseError>;
+    fn from_batch(
+        self,
+        response: &mut BatchResponse,
+    ) -> Result<Self::Responses, ResponseProcessingError>;
 }
 
 /// A trait for constructing a `ResponseReference` from a request ID.
@@ -779,22 +896,6 @@ pub trait Nullable {
     fn nullable(self) -> Self::Nullable;
 }
 
-/// A macro to implement `Nullable` for a type that is already nullable,
-/// making the `.nullable()` call idempotent.
-#[macro_export]
-#[doc(hidden)]
-macro_rules! impl_idempotent_nullable {
-    ($already_nullable:ident <$($life:lifetime,)? $($T:ident),*>) => {
-        impl<$($life,)? $($T),*> $crate::batch::Nullable for $already_nullable<$($life,)? $($T),*> {
-            type Nullable = $already_nullable<$($life,)? $($T),*>;
-
-            fn nullable(self) -> Self::Nullable {
-                self
-            }
-        }
-    };
-}
-
 /// A helper macro to create static arrays of strings for form part names,
 /// avoiding heap allocations for common cases.
 macro_rules! static_names {
@@ -815,11 +916,6 @@ macro_rules! static_names {
     };
 }
 
-// FIXME: Somehow we have to have selection of names by code and somehow ensure
-// uniqueness... Just found out the media enpoint won't take any file part name
-// other than "file"
-// Change to source?
-
 // Static arrays for named file and request parts to avoid heap allocations for small batches.
 static_names! {
     FILE_NAMES "file" [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
@@ -829,25 +925,8 @@ static_names! {
     REQUEST_NAMES "request" [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 }
 
-/// Helper macro to implement the `Requests::include` method for tuples.
-/// This is used internally to recursively build up the batch request types.
-/// While default in assoc is unstable
-#[macro_export]
-#[doc(hidden)]
-macro_rules! requests_batch_include {
-    () => {
-        // We need a name like this to avoid collision
-        type Include<SomeR> = (Self, SomeR);
-
-        fn include<SomeR>(self, r: SomeR) -> Self::Include<SomeR> {
-            (self, r)
-        }
-    };
-}
-
-// --- Trait Implementations ---
-
-pub(crate) use trait_impls::NullableUnit;
+// SECTION: Trait Implementations
+// ==============================
 
 /// Internal module containing trait implementations for core types.
 pub(crate) mod trait_impls {
@@ -868,21 +947,24 @@ pub(crate) mod trait_impls {
 
         type ResponseReference = (R1::ResponseReference, R2::ResponseReference);
 
+        #[inline]
         fn into_batch_ref(
             self,
-            f: &mut Formatter,
+            f: &mut BatchSerializer,
         ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
             let (h1, r1) = self.0.into_batch_ref(f)?;
             let (h2, r2) = self.1.into_batch_ref(f)?;
             Ok(((h1, h2), (r1, r2)))
         }
 
-        fn into_batch(self, f: &mut Formatter) -> Result<Self::BatchHandler, FormatError> {
+        #[inline]
+        fn into_batch(self, f: &mut BatchSerializer) -> Result<Self::BatchHandler, FormatError> {
             let h1 = self.0.into_batch(f)?;
             let h2 = self.1.into_batch(f)?;
             Ok((h1, h2))
         }
 
+        #[inline]
         fn size_hint(&self) -> (usize, Option<usize>) {
             let (lower_1, upper_1) = self.0.size_hint();
             let (lower_2, upper_2) = self.1.size_hint();
@@ -909,10 +991,11 @@ pub(crate) mod trait_impls {
         // #[must_use = "these `Responses` may contain errors, which should be handled"]
         type Responses = (H1::Responses, H2::Responses);
 
+        #[inline]
         fn from_batch(
             self,
             response: &mut BatchResponse,
-        ) -> Result<Self::Responses, FromResponseError> {
+        ) -> Result<Self::Responses, ResponseProcessingError> {
             let r1 = self.0.from_batch(response)?;
             let r2 = self.1.from_batch(response)?;
             Ok((r1, r2))
@@ -927,6 +1010,7 @@ pub(crate) mod trait_impls {
     {
         type Nullable = (T1::Nullable, T2::Nullable);
 
+        #[inline]
         fn nullable(self) -> Self::Nullable {
             (self.0.nullable(), self.1.nullable())
         }
@@ -939,12 +1023,12 @@ pub(crate) mod trait_impls {
 
         fn into_batch_ref(
             self,
-            _: &mut Formatter,
+            _: &mut BatchSerializer,
         ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
             Ok(((), ()))
         }
 
-        fn into_batch(self, _f: &mut Formatter) -> Result<Self::BatchHandler, FormatError> {
+        fn into_batch(self, _f: &mut BatchSerializer) -> Result<Self::BatchHandler, FormatError> {
             Ok(())
         }
 
@@ -953,6 +1037,10 @@ pub(crate) mod trait_impls {
 
         fn include<R>(self, r: R) -> Self::Include<R> {
             r
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (0, None)
         }
     }
 
@@ -963,9 +1051,15 @@ pub(crate) mod trait_impls {
         fn from_batch(
             self,
             _response: &mut BatchResponse,
-        ) -> Result<Self::Responses, FromResponseError> {
+        ) -> Result<Self::Responses, ResponseProcessingError> {
             Ok(())
         }
+    }
+
+    impl Nullable for () {
+        type Nullable = ();
+
+        fn nullable(self) -> Self::Nullable {}
     }
 
     /// Implements `Requests` for `Option<R>`, allowing for the conditional
@@ -979,9 +1073,10 @@ pub(crate) mod trait_impls {
 
         type ResponseReference = Option<R::ResponseReference>;
 
+        #[inline]
         fn into_batch_ref(
             self,
-            f: &mut Formatter,
+            f: &mut BatchSerializer,
         ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
             match self {
                 Some(r) => {
@@ -992,13 +1087,15 @@ pub(crate) mod trait_impls {
             }
         }
 
-        fn into_batch(self, f: &mut Formatter) -> Result<Self::BatchHandler, FormatError> {
+        #[inline]
+        fn into_batch(self, f: &mut BatchSerializer) -> Result<Self::BatchHandler, FormatError> {
             match self {
                 Some(r) => Ok(Some(r.into_batch(f)?)),
                 None => Ok(None),
             }
         }
 
+        #[inline]
         fn size_hint(&self) -> (usize, Option<usize>) {
             match self {
                 Some(r) => r.size_hint(),
@@ -1016,10 +1113,11 @@ pub(crate) mod trait_impls {
     {
         type Responses = Option<T::Responses>;
 
+        #[inline]
         fn from_batch(
             self,
             response: &mut BatchResponse,
-        ) -> Result<Self::Responses, FromResponseError> {
+        ) -> Result<Self::Responses, ResponseProcessingError> {
             match self {
                 Some(handler) => handler.from_batch(response).map(Some),
                 None => Ok(None),
@@ -1035,122 +1133,14 @@ pub(crate) mod trait_impls {
     {
         type Nullable = Option<T::Nullable>;
 
+        #[inline]
         fn nullable(self) -> Self::Nullable {
             self.map(|t| t.nullable())
         }
     }
 
-    crate::SimpleOutputBatch! {
+    SimpleOutputBatch! {
         Update <'a, [T: Serialize + Send + 'static], [U: FromResponseOwned + 'static]> => U
-    }
-
-    // This is what's become of the former Nullable struct
-    // Building block for Nullable
-    //
-    // Using something like NullableUnit<T> would prevent
-    // an operation from going multistep in the future without
-    // breaking changes (somehow the handler is public).. because
-    // that NullableUnit<T>... so we use macro instead
-    #[macro_export]
-    #[doc(hidden)]
-    macro_rules! NullableUnit {
-        ($T:ident <$($life:lifetime,)? $([$g:ty: $($b:tt)*]),*>) => {
-            paste::paste!{
-                impl<$($life,)? $($g: $($b)*),*> $crate::batch::Nullable for $T<$($life,)? $($g),*> {
-                    type Nullable = [<Nullable $T>] <$($life,)? $($g),*>;
-
-                    fn nullable(self) -> Self::Nullable {
-                        Self::Nullable {
-                            inner: self
-                        }
-                    }
-                }
-
-                $crate::impl_idempotent_nullable! {[<Nullable $T>] <$($life,)? $($g),*>}
-
-                pub struct [<Nullable $T>] <$($life,)? $($g),*> {
-                    inner: $T <$($life,)? $($g),*>
-                }
-
-                impl<$($life,)? $($g: $($b)*),*> $crate::batch::Requests for [<Nullable $T>] <$($life,)? $($g),*> {
-                    type BatchHandler = [<Nullable $T Handler>] <$($life,)? $($g),*>;
-
-                    type ResponseReference = <$T <$($life,)? $($g),*> as $crate::batch::Requests>::ResponseReference;
-
-                    #[inline]
-                    fn into_batch_ref(
-                        self,
-                        f: &mut $crate::batch::Formatter,
-                    ) -> Result<(Self::BatchHandler, Self::ResponseReference), $crate::batch::FormatError> {
-                        let (h, r) = self.inner.into_batch_ref(f)?;
-                        Ok(([<Nullable $T Handler>]{inner: h}, r))
-                    }
-
-                    #[inline]
-                    fn into_batch(self, f: &mut $crate::batch::Formatter) -> Result<Self::BatchHandler, $crate::batch::FormatError>
-                    where
-                        Self: Sized,
-                    {
-                        let h = self.inner.into_batch(f)?;
-                        Ok([<Nullable $T Handler>]{inner: h})
-                    }
-
-                    fn size_hint(&self) -> (usize, Option<usize>) {
-                        // (1, Some(1)) SendMessage breaks this assumption
-                        self.inner.size_hint()
-                    }
-
-                    $crate::requests_batch_include! {}
-                }
-
-                pub struct [<Nullable $T Handler>] <$($life,)? $($g: $($b)*),*> {
-                    inner: <$T <$($life,)? $($g),*> as $crate::batch::Requests>::BatchHandler
-                }
-
-                impl<$($life,)? $($g: $($b)*),*> $crate::batch::Handler for [<Nullable $T Handler>] <$($life,)? $($g),*> {
-                    type Responses =
-                        Option<<<$T <$($life,)? $($g),*> as $crate::batch::Requests>::BatchHandler as $crate::batch::Handler>::Responses>;
-
-                    fn from_batch(
-                        self,
-                        response: &mut $crate::batch::BatchResponse,
-                    ) -> Result<Self::Responses, $crate::batch::FromResponseError> {
-                        match self.inner.from_batch(response) {
-                            Ok(val) => Ok(Some(val)),
-                            Err($crate::batch::FromResponseError {
-                                kind: $crate::batch::FromResponseErrorKind::NullNotNullable,
-                                ..
-                            }) => Ok(None),
-                            Err(err) => Err(err), // real error, propagate
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // For internals
-    pub(crate) struct NullableUnit<T>(pub T);
-
-    impl<T> Handler for NullableUnit<T>
-    where
-        T: Handler,
-    {
-        type Responses = Option<T::Responses>;
-
-        fn from_batch(
-            self,
-            response: &mut BatchResponse,
-        ) -> Result<Self::Responses, FromResponseError> {
-            match self.0.from_batch(response) {
-                Ok(val) => Ok(Some(val)),
-                Err(FromResponseError {
-                    kind: FromResponseErrorKind::NullNotNullable,
-                    ..
-                }) => Ok(None),
-                Err(err) => Err(err), // real error, propagate
-            }
-        }
     }
 }
 
@@ -1158,22 +1148,27 @@ impl<Rs> Requests for Batch<Rs>
 where
     Rs: Requests,
 {
-    // TODO:
     type BatchHandler = Rs::BatchHandler;
 
     type ResponseReference = Rs::ResponseReference;
 
+    #[inline]
     fn into_batch_ref(
         self,
-        f: &mut Formatter,
+        batch_serializer: &mut BatchSerializer,
     ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
-        self.requests.into_batch_ref(f)
+        self.requests.into_batch_ref(batch_serializer)
     }
 
-    fn into_batch(self, f: &mut Formatter) -> Result<Self::BatchHandler, FormatError> {
-        self.requests.into_batch(f)
+    #[inline]
+    fn into_batch(
+        self,
+        batch_serializer: &mut BatchSerializer,
+    ) -> Result<Self::BatchHandler, FormatError> {
+        self.requests.into_batch(batch_serializer)
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.requests.size_hint()
     }
@@ -1187,6 +1182,7 @@ where
 {
     type Nullable = Batch<T::Nullable>;
 
+    #[inline]
     fn nullable(self) -> Self::Nullable {
         Batch {
             client: self.client,
@@ -1206,6 +1202,7 @@ pub struct Many<Iter> {
 
 impl<Iter> Many<Iter> {
     /// Creates a new `Many` from an iterator.
+    #[inline]
     pub fn new(iter: Iter) -> Self {
         Self { iter }
     }
@@ -1232,15 +1229,16 @@ where
 
     type ResponseReference = ManyReferences<Rs::ResponseReference>;
 
+    #[inline]
     fn into_batch_ref(
         self,
-        f: &mut Formatter,
+        batch_serializer: &mut BatchSerializer,
     ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
         let (size, _) = self.iter.size_hint();
         let mut handlers = Vec::with_capacity(size);
         let mut references = Vec::with_capacity(size);
         for request in self.iter {
-            let (h, r) = request.into_batch_ref(f)?;
+            let (h, r) = request.into_batch_ref(batch_serializer)?;
             handlers.push(h);
             references.push(r)
         }
@@ -1253,18 +1251,23 @@ where
         ))
     }
 
-    fn into_batch(self, f: &mut Formatter) -> Result<Self::BatchHandler, FormatError> {
+    #[inline]
+    fn into_batch(
+        self,
+        batch_serializer: &mut BatchSerializer,
+    ) -> Result<Self::BatchHandler, FormatError> {
         // We should not have any allocation in most cases in release builds since most
         // handlers are zero sized
         let (size, _) = self.iter.size_hint();
         let mut handlers = Vec::with_capacity(size);
         for request in self.iter {
-            handlers.push(request.into_batch(f)?)
+            handlers.push(request.into_batch(batch_serializer)?)
         }
 
         Ok(ManyHandlers { handlers })
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         // Let's assume 1 request per `Requests`... Only `()` currently fails this
         let (iter_lower, _) = self.iter.size_hint();
@@ -1279,6 +1282,7 @@ where
     I: Iterator<Item = T>,
     T: Nullable,
 {
+    #[inline]
     pub fn nullable(self) -> Many<impl Iterator<Item = T::Nullable>> {
         Many {
             iter: self.iter.map(|t| t.nullable()),
@@ -1286,7 +1290,7 @@ where
     }
 }
 
-#[cfg(feature = "nightly_rust")]
+#[cfg(nightly_rust)]
 impl<I, T> Nullable for Many<I>
 where
     I: Iterator<Item = T>,
@@ -1294,7 +1298,8 @@ where
 {
     type Nullable = Many<impl Iterator<Item = T::Nullable>>;
 
-    pub fn nullable(self) -> Self::Nullable {
+    #[inline]
+    fn nullable(self) -> Self::Nullable {
         self.nullable()
     }
 }
@@ -1310,18 +1315,11 @@ where
 {
     type Responses = ManyResponses<H::Responses>;
 
+    #[inline]
     fn from_batch(
         self,
         response: &mut BatchResponse,
-    ) -> Result<Self::Responses, FromResponseError> {
-        // FIXME: Somehow support lazy parsing
-        //
-        // We stemmed from a list of list of request with only the handlers
-        // knowing where to stop reading... so our expected calculation is
-        // wrong... say we have Many<Many<SomeRequest>> created from 5 Many's
-        // We'd think we should expect 5 individual items but we'd be wrong
-        // because each Many may be expecting any number of requests.
-
+    ) -> Result<Self::Responses, ResponseProcessingError> {
         let mut all_responses = Vec::with_capacity(self.handlers.len());
         for handler in self.handlers {
             let responses = handler.from_batch(response)?;
@@ -1340,6 +1338,7 @@ pub struct ManyReferences<R> {
 impl<R> Iterator for ManyReferences<R> {
     type Item = R;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.references.next()
     }
@@ -1357,10 +1356,15 @@ pub struct ManyResponses<R> {
 impl<R> Iterator for ManyResponses<R> {
     type Item = R;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.responses.next()
     }
 }
+
+/// A dependent request where the initial request's response can be null.    
+pub type ThenNullable<R1, R2, F = fn(<R1 as Requests>::ResponseReference) -> R2> =
+    Then<<R1 as Nullable>::Nullable, R2, F>;
 
 /// Used to create a dependent request chain for a batch operation.
 /// It encapsulates a request (r1) and a closure (f) that will be executed later.
@@ -1368,7 +1372,7 @@ impl<R> Iterator for ManyResponses<R> {
 /// (represented by a ResponseReference) becomes the input for a subsequent request.
 /// The entire chain is then sent to the server in a single, efficient batch.
 #[derive(Debug)]
-pub struct Then<R1, R2, F> {
+pub struct Then<R1, R2, F = fn(<R1 as Requests>::ResponseReference) -> R2> {
     r1: R1,
     f: F,
     _r2: PhantomData<R2>,
@@ -1394,27 +1398,33 @@ where
 
     type ResponseReference = R2::ResponseReference;
 
+    #[inline]
     fn into_batch_ref(
         self,
-        f: &mut Formatter,
+        batch_serializer: &mut BatchSerializer,
     ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
-        let (h, r_ref) = self.r1.into_batch_ref(f)?;
+        let (h, r_ref) = self.r1.into_batch_ref(batch_serializer)?;
 
-        let (h1, r1_ref) = (self.f)(r_ref).into_batch_ref(f)?;
+        let (h1, r1_ref) = (self.f)(r_ref).into_batch_ref(batch_serializer)?;
 
         // R entered before R1
         Ok(((h, h1), r1_ref))
     }
 
-    fn into_batch(self, f: &mut Formatter) -> Result<Self::BatchHandler, FormatError> {
-        let (h, r_ref) = self.r1.into_batch_ref(f)?;
+    #[inline]
+    fn into_batch(
+        self,
+        batch_serializer: &mut BatchSerializer,
+    ) -> Result<Self::BatchHandler, FormatError> {
+        let (h, r_ref) = self.r1.into_batch_ref(batch_serializer)?;
 
-        let h1 = (self.f)(r_ref).into_batch(f)?;
+        let h1 = (self.f)(r_ref).into_batch(batch_serializer)?;
 
         // R entered before R1
         Ok((h, h1))
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (lower, _) = self.r1.size_hint();
         // Let's assume 1 request in the request to be produced
@@ -1431,6 +1441,7 @@ where
     F: FnOnce(R1::ResponseReference) -> R2,
     R2: Nullable,
 {
+    #[inline]
     pub fn nullable(
         self,
     ) -> Then<R1::Nullable, R2::Nullable, impl FnOnce(R1::ResponseReference) -> R2::Nullable> {
@@ -1445,7 +1456,7 @@ where
     }
 }
 
-#[cfg(feature = "nightly_rust")]
+#[cfg(nightly_rust)]
 impl<R1, R2, F> Nullable for Then<R1, R2, F>
 where
     R1: Nullable + Requests,
@@ -1455,9 +1466,8 @@ where
     type Nullable =
         Then<R1::Nullable, R2::Nullable, impl FnOnce(R1::ResponseReference) -> R2::Nullable>;
 
-    fn nullable(
-        self,
-    ) -> Then<R1::Nullable, R2::Nullable, impl FnOnce(R1::ResponseReference) -> R2::Nullable> {
+    #[inline]
+    fn nullable(self) -> Self::Nullable {
         self.nullable()
     }
 }
@@ -1470,6 +1480,7 @@ where
     F: FnOnce(R1::ResponseReference) -> R2,
     R2: Nullable,
 {
+    #[inline]
     pub fn right_nullable(
         self,
     ) -> Then<R1, R2::Nullable, impl FnOnce(R1::ResponseReference) -> R2::Nullable> {
@@ -1484,7 +1495,98 @@ where
     }
 }
 
-// --- Response Handling ---
+/// A request combined with a function to transform its output.
+///
+/// This struct is created by the [`.map()`](Requests::map) method. It holds the original
+/// request and the closure that will be applied to the response after execution.
+/// You will likely not need to interact with this type directly.
+#[derive(Debug)]
+pub struct Map<R, F> {
+    r: R,
+    f: F,
+}
+
+impl<R, F> Map<R, F> {
+    #[inline]
+    pub fn new(r: R, f: F) -> Self {
+        Self { r, f }
+    }
+}
+
+impl<R, F, U> Requests for Map<R, F>
+where
+    R: Requests,
+    F: FnOnce(<R::BatchHandler as Handler>::Responses) -> U,
+    R::BatchHandler: Handler,
+{
+    type BatchHandler = MapHandler<R::BatchHandler, F>;
+
+    // This doesn't change the actual response from the server
+    type ResponseReference = R::ResponseReference;
+
+    #[inline]
+    fn into_batch_ref(
+        self,
+        batch_serializer: &mut BatchSerializer,
+    ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
+        let (h, r_ref) = self.r.into_batch_ref(batch_serializer)?;
+
+        Ok((
+            MapHandler {
+                inner: h,
+                f: self.f,
+            },
+            r_ref,
+        ))
+    }
+
+    #[inline]
+    fn into_batch(
+        self,
+        batch_serializer: &mut BatchSerializer,
+    ) -> Result<Self::BatchHandler, FormatError> {
+        let h = self.r.into_batch(batch_serializer)?;
+        Ok(MapHandler {
+            inner: h,
+            f: self.f,
+        })
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.r.size_hint()
+    }
+
+    requests_batch_include! {}
+}
+// NOTE: Nullable for Map seems impossible... code
+
+#[derive(Debug)]
+pub struct MapHandler<H, F> {
+    inner: H,
+    f: F,
+}
+
+impl<H, F, U> Handler for MapHandler<H, F>
+where
+    H: Handler,
+    F: FnOnce(H::Responses) -> U,
+{
+    type Responses = U;
+
+    #[inline]
+    fn from_batch(
+        self,
+        response: &mut BatchResponse,
+    ) -> Result<Self::Responses, ResponseProcessingError> {
+        // We don't expose the error to prevent error-swallowing
+        let response = self.inner.from_batch(response)?;
+        Ok((self.f)(response))
+    }
+}
+
+// SECTION: Response Handling
+// ===========================
 
 /// The result of a successful batch request execution, containing the response data.
 ///
@@ -1506,6 +1608,7 @@ where
     ///
     /// This drives the `Handler` to consume the response iterator and produce the
     /// final, often nested result type.
+    #[inline]
     pub fn result(mut self) -> Result<H::Responses, BatchResponseError> {
         self.handler
             .from_batch(&mut self.response)
@@ -1520,6 +1623,7 @@ where
     ///
     /// ### Example
     /// If your responses are `((Res1, Res2), Res3)`, flattening produces `(Res1, Res2, Res3)`.
+    #[inline]
     pub fn flatten<F>(self) -> Result<F, BatchResponseError>
     where
         F: FlattenFrom<H::Responses>,
@@ -1529,39 +1633,59 @@ where
 }
 
 impl<H> BatchOutput<H> {
-    fn from_parts(handler: H, response: Vec<Option<AResponse>>) -> Self {
+    #[inline]
+    fn from_parts(handler: H, response: Vec<Option<BatchSubResponse>>) -> Self {
         Self {
             handler,
-            response: BatchResponse::from_part(response),
+            response: BatchResponse::new(response),
         }
     }
 }
 
+/// Represents the deserialized response from a batch request API call.
+///
+/// This struct acts as an iterator over the individual sub-responses contained
+/// within the batch response payload.
 #[derive(Debug)]
 pub(crate) struct BatchResponse {
-    // If we could get some deserialize_seq, it'd be smooth
-    responses: <Vec<Option<AResponse>> as IntoIterator>::IntoIter,
+    /// An iterator over the potentially null sub-responses.
+    responses: std::vec::IntoIter<Option<BatchSubResponse>>,
 }
 
 impl BatchResponse {
-    fn from_part(iter: Vec<Option<AResponse>>) -> Self {
+    /// Creates a new `BatchResponse` from a vector of deserialized sub-responses.
+    pub fn new(responses: Vec<Option<BatchSubResponse>>) -> Self {
         Self {
-            responses: iter.into_iter(),
+            responses: responses.into_iter(),
         }
     }
 
+    /// Processes the next sub-response, attempting to deserialize it into a specific type `T`.
+    ///
+    /// This is a convenience method that encapsulates the common pattern of handling the
+    /// three possible states of a sub-response: a valid response, a `null` response, or an error.
+    ///
+    /// # Arguments
+    /// * `endpoint`: The endpoint of the original sub-request. This is used to create
+    ///   a more informative error message if something goes wrong.
+    ///
+    /// # Returns
+    /// * `Ok(Ok(T))`: Successful deserialization.
+    /// * `Ok(Err(crate::Error))`: The API returned a non-success status code (e.g., 404, 500).
+    /// * `Err(ResponseProcessingError)`: An error occurred while processing the batch response
+    ///   itself (e.g., not enough responses, or a `null` was received for a non-nullable request).
     #[inline]
-    pub fn handle_next_typical<T>(
+    pub fn try_next<T: FromResponseOwned>(
         &mut self,
         #[cfg(debug_assertions)] endpoint: Cow<'static, str>,
-    ) -> Result<Result<T, crate::Error>, FromResponseError>
-    where
-        T: FromResponseOwned,
-    {
+    ) -> Result<Result<T, crate::Error>, ResponseProcessingError> {
         match self.next() {
-            Some(Ok(Some(me))) => {
-                let status = me.status();
-                let body = me.body();
+            // A valid sub-response was found.
+            Some(Some(sub_response)) => {
+                let status = sub_response.status();
+                let body = sub_response.body();
+
+                // Delegate to the main client response handler.
                 Ok(Client::handle_response_(
                     status,
                     body.as_bytes(),
@@ -1569,449 +1693,497 @@ impl BatchResponse {
                     endpoint,
                 ))
             }
-            Some(Ok(None)) => Err(FromResponseError::null_not_nullable().error(
-                #[cfg(debug_assertions)]
+            // A `null` was present in the response array.
+            Some(None) => Err(ResponseProcessingError::new(
                 endpoint,
+                ResponseProcessingErrorKind::NullNotNullable,
             )),
-            Some(Err(err)) => Err(err),
-            None => Err(FromResponseError::insufficient(1, 0).error(
+            // The iterator is exhausted, but a response was expected.
+            None => Err(ResponseProcessingError::new(
                 #[cfg(debug_assertions)]
                 endpoint,
-            )), // it'd be good if we could track positions,
+                ResponseProcessingErrorKind::InsufficientResponses {
+                    // Note: We can't know the `want` and `got` counts from here,
+                    // but the context implies we wanted at least one more.
+                    want: 1,
+                    got: 0,
+                },
+            )),
         }
     }
 }
 
 impl Iterator for BatchResponse {
-    // It seems meta completely eats the response of a request
-    // that'd been depended on... like they swapped it with null
-    // and moved it... this is a speculation... they may do it for
-    // some other reasons... so if you know you're not that important
-    // just be Ok(None)
-
-    /// `Ok(Some(AResponse))` → real response
+    /// The outcome of iterating over a single sub-response slot.
     ///
-    /// `Ok(None)` → slot was literal null
+    /// - `Ok(Some(BatchSubResponse))`: A valid response object was present.
+    /// - `Ok(None)`: A `null` was present, often because the request was a dependency for another.
+    /// - `Err(ResponseProcessingError)`: A fundamental error in processing the response stream.
     ///
-    /// `Err(_)` → genuine parse/transport error
-    type Item = Result<Option<AResponse>, FromResponseError>;
+    /// NOTE: No longer returning Result. The former result was only symbolic but took 2x the space
+    /// of what we have now.
+    type Item = Option<BatchSubResponse>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.responses.next().map(Ok)
+        self.responses.next()
     }
 }
 
+/// A single response object within the main batch response array.
+/// The `Body` is generic to allow for different response body types if needed.
 #[derive(Deserialize, Debug)]
-pub(crate) struct AResponse<Body = BatchResBody> {
-    code: u16,
+pub(crate) struct BatchSubResponse<Body = BatchResponseBody> {
+    #[serde(rename = "code")]
+    status_code: u16,
     body: Body,
 }
 
-pub(crate) type BatchResBody = Box<str>;
+/// The default type for the body of a sub-response, a heap-allocated string slice.
+pub type BatchResponseBody = Box<str>;
 
-impl<Body> AResponse<Body> {
+impl<Body> BatchSubResponse<Body> {
+    /// Returns the HTTP status code of the sub-response.
+    /// Falls back to the default `StatusCode` (200 OK) if the code is invalid.
     pub fn status(&self) -> StatusCode {
-        StatusCode::from_u16(self.code).unwrap_or_default()
-        // .expect("Valid status from meta")
+        StatusCode::from_u16(self.status_code).unwrap_or_default()
     }
 
+    /// Consumes the sub-response and returns its body.
     pub fn body(self) -> Body {
         self.body
     }
 }
 
-// --- Formatter & Builders ---
+// SECTION: Serialization Logic for Batch Requests
+// ===============================================
 
-#[must_use = "don't forget to call finish_into_files"]
-pub(crate) struct Formatter<'a> {
-    batch_serializer: <&'a mut serde_json::Serializer<Vec<u8>> as Serializer>::SerializeSeq,
-    named_batch_counter: usize,
-    files: Vec<Part>,
+/// Handles the serialization of a sequence of sub-requests into a JSON array string.
+/// It also collects all binary file parts that need to be attached to the final
+/// multipart request.
+#[must_use = "finish must be called to finalize serialization"]
+pub(crate) struct BatchSerializer<'a> {
+    // The serde serializer for the top-level JSON array of requests.
+    seq_serializer: <&'a mut serde_json::Serializer<Vec<u8>> as Serializer>::SerializeSeq,
+    // Counter to generate unique names for requests that need to be referenced.
+    named_request_counter: usize,
+    // Counter to generate unique names for attached files.
+    file_attachment_counter: usize,
+    // A collection of all file parts to be included in the multipart form.
+    // Each tuple holds the form field name and the file `Part` itself.
+    files: Vec<(Cow<'static, str>, Part)>,
 }
 
-impl<'a> Formatter<'a> {
+impl<'a> BatchSerializer<'a> {
     fn new(
         serializer: <&'a mut serde_json::Serializer<Vec<u8>> as Serializer>::SerializeSeq,
     ) -> Self {
         Self {
-            batch_serializer: serializer,
-            named_batch_counter: 0,
+            seq_serializer: serializer,
+            named_request_counter: 0,
+            file_attachment_counter: 0,
             files: Vec::new(),
         }
     }
 
-    fn finish_into_files(self) -> Result<Vec<Part>, FormatError> {
-        self.batch_serializer
+    /// Finalizes the JSON array serialization and returns the collected files.
+    fn finish(self) -> Result<Vec<(Cow<'static, str>, Part)>, FormatError> {
+        // Correctly ends the JSON array `]`.
+        self.seq_serializer
             .end()
             .map_err(FormatError::Serialization)?;
         Ok(self.files)
     }
 
+    /// Serializes a single sub-request into the JSON array.
     #[inline]
-    fn add_binary_(&mut self, bin: Part) -> Cow<'static, str> {
-        self.files.push(bin);
-
-        let added = self.files.len();
-        // Use saturating_sub to avoid panic on index
-        Self::get_binary_name(added.saturating_sub(1))
-    }
-
-    #[inline]
-    fn add_request_<B>(&mut self, req: &ARequest<B>) -> Result<(), FormatError>
+    fn serialize_request<P, Q>(
+        &mut self,
+        request: &BatchSubRequest<'_, P, Q>,
+    ) -> Result<(), FormatError>
     where
-        B: AsRef<[u8]>,
+        P: Serialize,
+        Q: Serialize,
     {
-        self.batch_serializer
-            .serialize_element(req)
+        self.seq_serializer
+            .serialize_element(request)
             .map_err(FormatError::Serialization)
     }
 
-    // Must only be called for non-stream bodies.
+    /// Adds a file part to the collection and returns the name assigned to it.
+    /// The name will be used in the `attached_files` field of the sub-request JSON.
     #[inline]
-    pub fn add_request<'b, R, B>(
-        &'b mut self,
-        req: R,
-    ) -> Result<FormatAddRequest<'b, 'a, B>, FormatError>
-    where
-        R: TryInto<ARequest<B>>,
-        FormatError: From<R::Error>,
-        B: AsRef<[u8]>,
-    {
-        Ok(FormatAddRequest {
-            f: self,
-            request: req.try_into()?,
-        })
+    fn add_attachment(&mut self, name: Option<Cow<'static, str>>, part: Part) -> Cow<'static, str> {
+        // If a name is provided, use it. Otherwise, generate a unique one.
+        let file_name = name.unwrap_or_else(|| {
+            let name = file_names(self.file_attachment_counter);
+            self.file_attachment_counter += 1;
+            name
+        });
+
+        self.files.push((file_name.clone(), part));
+        file_name
     }
 
+    /// Gets the next unique name for a request (e.g., "request0", "request1").
     #[inline]
     fn get_next_request_name(&mut self) -> Cow<'static, str> {
-        let name = request_names(self.named_batch_counter);
-        self.named_batch_counter += 1;
+        let name = request_names(self.named_request_counter);
+        self.named_request_counter += 1;
         name
     }
 
+    /// Creates a formatter for a single sub-request.
+    /// This is the entry point for formatting a `PendingRequest` into the batch.
     #[inline]
-    fn get_binary_name(index: usize) -> Cow<'static, str> {
-        file_names(index)
-    }
-}
-
-#[derive(Serialize, Default, Debug)]
-pub(crate) struct ARequest<Body: AsRef<[u8]>> {
-    #[serde(serialize_with = "serialize_method")]
-    method: Method,
-
-    #[serde(serialize_with = "serialize_url")]
-    relative_url: UrlAccessTokenPair,
-
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "encode_request_body"
-    )]
-    body: Option<Body>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<Cow<'static, str>>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attached_files: Option<Cow<'static, str>>,
-}
-
-// This is done to avoid heap-allocations while making the url relative
-// and while applying the access_token to the url using the sweet
-// collect_str method
-#[derive(Default, Debug)]
-struct UrlAccessTokenPair {
-    url: String,
-
-    // keep the whole thing... we only need to read and that costs no allocation
-    // unlike removing
-    headers: reqwest::header::HeaderMap,
-}
-
-impl UrlAccessTokenPair {
-    fn from_parts(url: Url, headers: HeaderMap) -> Self {
-        Self {
-            url: url.into(),
-            headers,
+    pub fn format_request<'b, P, Q>(
+        &'b mut self,
+        req: impl Into<BatchSubRequest<'a, P, Q>>,
+    ) -> SingleRequestFormatter<'b, 'a, P, Q> {
+        SingleRequestFormatter {
+            serializer: self,
+            sub_request: req.into(),
         }
     }
 }
 
-impl Display for UrlAccessTokenPair {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(Batch::make_url_relative(&self.url))?;
+/// A builder-style formatter for a *single* sub-request within the batch.
+///
+/// It allows for chaining modifications like adding a JSON body or attaching files
+/// before finally calling `.finish()` to serialize it into the main batch array.
+#[must_use = "must call .finish() to add the request to the batch"]
+pub(crate) struct SingleRequestFormatter<'a, 'b: 'a, P, Q> {
+    serializer: &'a mut BatchSerializer<'b>,
+    sub_request: BatchSubRequest<'a, P, Q>,
+}
 
-        if let Some(access_token) = self.headers.get(AUTHORIZATION) {
-            f.write_str("?access_token=")?;
-            if let Ok(val) = access_token.to_str() {
-                // Strip bearer prefix at display time
-                if let Some(stripped) = val.strip_prefix("Bearer ") {
-                    // No need for url encoding(the auth is already well-formatted)
-                    f.write_str(stripped)?
-                } else {
-                    f.write_str(val)?
-                }
-            } else {
-                // Rare case: non-UTF8, fall back to lossy
-                let lossy = String::from_utf8_lossy(access_token.as_bytes());
-                f.write_str(&lossy)?
+impl<'a, 'b: 'a, P, Q> SingleRequestFormatter<'a, 'b, P, Q>
+where
+    P: Serialize,
+    Q: Serialize,
+{
+    /// Attaches a binary file to this sub-request.
+    ///
+    /// You can provide an optional `name` if the API endpoint requires a specific
+    /// field name (e.g., "file"). If `None`, a unique name will be generated.
+    #[inline]
+    pub fn attach_file(mut self, name: Option<Cow<'static, str>>, part: Part) -> Self {
+        // Add the file to the main serializer's collection and get its assigned name.
+        let file_name = self.serializer.add_attachment(name, part);
+
+        // Append the file's name to the 'attached_files' field.
+        // The API expects a comma-separated string of file names.
+        match self.sub_request.attached_files {
+            Some(ref mut names) => {
+                // Already have attached files, so append with a comma.
+                let mut mutable_names = names.to_string();
+                mutable_names.push(',');
+                mutable_names.push_str(&file_name);
+                *names = Cow::Owned(mutable_names);
             }
-        }
-        Ok(())
-    }
-}
-
-fn serialize_url<S: Serializer>(url: &UrlAccessTokenPair, ser: S) -> Result<S::Ok, S::Error> {
-    ser.collect_str(url)
-}
-
-fn serialize_method<S: Serializer>(method: &Method, ser: S) -> Result<S::Ok, S::Error> {
-    ser.serialize_str(method.as_str())
-}
-
-/// Converts a top-level JSON object into a form-encoded string like `key=value&key2=value2`.
-/// Borrows where possible, allocates only when JSON string unescaping is required.
-fn encode_request_body<S: Serializer, Body: AsRef<[u8]>>(
-    v: &Option<Body>,
-    ser: S,
-) -> Result<S::Ok, S::Error> {
-    struct Params<'a> {
-        // Using something as lazy as MapAcess here
-        // would be the best
-        outer_map: HashMap<&'a str, &'a RawValue>,
-    }
-    impl Display for Params<'_> {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            self.outer_map
-                .iter()
-                .enumerate()
-                .try_for_each(|(i, (key, value))| {
-                    let s = value.get();
-                    let val: Cow<'_, str> = if s.starts_with('"') {
-                        // Allocate only if there's need to unescape data
-                        serde_json::from_str(s).unwrap_or(Cow::Borrowed(""))
-                    } else {
-                        Cow::Borrowed(s)
-                    };
-                    if i != 0 {
-                        f.write_str("&")?;
-                    }
-
-                    let url_encoded = percent_encoding::utf8_percent_encode(&val, NON_ALPHANUMERIC);
-                    f.write_fmt(format_args!("{key}={url_encoded}"))?;
-                    Ok(())
-                })
-        }
-    }
-
-    match v {
-        None => ser.serialize_none(),
-        Some(v) => {
-            let outer_map: HashMap<&str, &RawValue> =
-                serde_json::from_slice(v.as_ref()).map_err(serde::ser::Error::custom)?;
-            ser.collect_str(&Params { outer_map })
-        }
-    }
-}
-
-impl TryFrom<reqwest::RequestBuilder> for ARequest<JsonReqwestBody> {
-    // mm not right
-    type Error = FormatError;
-
-    fn try_from(value: reqwest::RequestBuilder) -> Result<Self, Self::Error> {
-        let request = value.build().map_err(FormatError::Reqwest)?;
-
-        #[allow(dead_code)]
-        pub struct Request {
-            method: Method,
-            url: Url,
-            headers: HeaderMap,
-            body: Option<reqwest::Body>,
-            version: reqwest::Version,
-            extensions: axum::http::Extensions,
-        }
-
-        let request = unsafe { std::mem::transmute::<reqwest::Request, Request>(request) };
-
-        // This assumes the body is json.
-        Ok(ARequest {
-            method: request.method,
-            body: if let Some(body) = request.body {
-                // Slight check that we have bytes and json
-                if body.as_bytes().is_some()
-                    && request
-                        .headers
-                        .get(CONTENT_TYPE)
-                        .is_some_and(|v| v == "application/json")
-                {
-                    Some(JsonReqwestBody(body))
-                } else {
-                    return Err(FormatError::InvalidBody);
-                }
-            } else {
-                None
-            },
-            relative_url: UrlAccessTokenPair::from_parts(request.url, request.headers),
-            ..Default::default()
-        })
-    }
-}
-
-#[derive(Default, Debug)]
-pub(crate) struct JsonReqwestBody(reqwest::Body);
-
-impl AsRef<[u8]> for JsonReqwestBody {
-    fn as_ref(&self) -> &[u8] {
-        // The check already occured in try_from
-        self.0.as_bytes().unwrap()
-    }
-}
-
-#[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) struct RequestDebug {
-    pub url: String,
-}
-
-#[must_use = "must eventually call `finish()`"]
-pub(crate) struct FormatAddRequest<'a, 'b: 'a, B: AsRef<[u8]>> {
-    f: &'a mut Formatter<'b>,
-    request: ARequest<B>,
-}
-
-impl<'a, 'b: 'a, B: AsRef<[u8]>> FormatAddRequest<'a, 'b, B> {
-    // Adds this to the list of binaries
-    pub fn binary(mut self, part: Part) -> Self {
-        let filename = self.f.add_binary_(part);
-
-        // Reference the file
-        self.request.attached_files = match self.request.attached_files {
-            Some(names) => Some(format!("{names},{filename}").into()),
-            None => Some(filename),
+            None => {
+                // This is the first file for this request.
+                self.sub_request.attached_files = Some(file_name);
+            }
         };
 
         self
     }
 
-    // Must be json... if you had key=value pass as {"key": "value"}... we can't
-    // keep track of which is json or not so it's better to have json all-through
-    // since it's the most used.
-    pub fn raw_json<J>(self, body: J) -> FormatAddRequest<'a, 'b, J>
-    where
-        J: AsRef<[u8]>,
-    {
-        FormatAddRequest {
-            f: self.f,
-            request: ARequest {
-                body: Some(body),
-                method: self.request.method,
-                relative_url: self.request.relative_url,
-                name: self.request.name,
-                attached_files: self.request.attached_files,
+    /// Sets the JSON body for this sub-request.
+    #[inline]
+    pub fn json_object_body<J>(
+        self,
+        body: J,
+    ) -> SingleRequestFormatter<'a, 'b, JsonObjectPayload<J>, Q> {
+        // This creates a new formatter with an updated payload type.
+        SingleRequestFormatter {
+            serializer: self.serializer,
+            sub_request: BatchSubRequest {
+                body: FormEncoded(JsonObjectPayload(body)),
+                // Copy over all other fields from the previous state.
+                method: self.sub_request.method,
+                relative_url: self.sub_request.relative_url,
+                name: self.sub_request.name,
+                attached_files: self.sub_request.attached_files,
             },
         }
     }
 
+    /// Ensures this request has a name and returns it.
+    ///
+    /// A name is required if other requests in the batch need to depend on this one.
+    /// The name is generated on-demand to ensure uniqueness.
+    #[inline]
     pub fn get_name(&mut self) -> Cow<'static, str> {
-        self.request
+        self.sub_request
             .name
-            .get_or_insert_with(|| self.f.get_next_request_name())
+            .get_or_insert_with(|| self.serializer.get_next_request_name())
             .clone()
     }
 
-    #[cfg(not(debug_assertions))]
+    /// Finalizes this sub-request and serializes it into the batch.
+    #[inline]
     pub fn finish(self) -> Result<(), FormatError> {
-        self.f.add_request_(&self.request)
-    }
-
-    #[cfg(debug_assertions)]
-    pub fn finish(self) -> Result<RequestDebug, FormatError> {
-        self.f.add_request_(&self.request)?;
-        Ok(RequestDebug {
-            // Exclude auth
-            url: self.request.relative_url.url,
-        })
+        self.serializer.serialize_request(&self.sub_request)
     }
 }
 
-// --- Error Handling & Utilities ---
+// SECTION: Data Structures for Serialization
+// ============================================
 
-#[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-pub struct BatchResponseError {
-    inner: FromResponseError,
+/// Represents a single sub-request that can be serialized into the batch JSON array.
+#[derive(Serialize, Debug)]
+pub(crate) struct BatchSubRequest<'a, P, Q> {
+    #[serde(serialize_with = "serialize_method_as_str")]
+    method: Method,
+    #[serde(rename = "relative_url")]
+    relative_url: RelativeUrlSerializer<'a, Q>,
+    #[serde(skip_serializing_if = "FormEncoded::is_zst")]
+    body: FormEncoded<P>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<Cow<'static, str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attached_files: Option<Cow<'static, str>>,
 }
 
-// A custom error type for failures during batch response reading.
-// NOTE: This isn't the error encountered during actual parsing into your expected
-#[derive(Debug, thiserror::Error)]
-#[cfg_attr(debug_assertions, error("Error at endpoint '{endpoint}': {kind}"))]
-#[cfg_attr(not(debug_assertions), error("{kind}"))]
-pub(crate) struct FromResponseError {
-    #[cfg(debug_assertions)]
-    pub(crate) endpoint: Cow<'static, str>,
-    pub(crate) kind: FromResponseErrorKind,
+/// Custom serializer for `http::Method` to serialize it as an uppercase string (e.g., "POST").
+#[inline]
+fn serialize_method_as_str<S: Serializer>(method: &Method, ser: S) -> Result<S::Ok, S::Error> {
+    ser.serialize_str(method.as_str())
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum FromResponseErrorKind {
-    #[error("Expected {want} response(s), but only got {got}")]
-    InsufficientResponses { want: usize, got: usize },
-    #[error(
-        "The API returned a null response where a valid one was required. \
-            If this request can be null, consider using `nullable()` or `then_nullable()`."
-    )]
-    NullNotNullable,
+/// A helper struct responsible for serializing the URL, query parameters, and
+/// access token into the final `relative_url` string.
+#[derive(Debug)]
+pub(crate) struct RelativeUrlSerializer<'a, Q> {
+    endpoint_url: String,
+    query: Q,
+    auth: Option<Cow<'a, Auth>>,
 }
 
-impl FromResponseError {
-    pub(crate) fn insufficient(want: usize, got: usize) -> FromResponseErrorKind {
-        FromResponseErrorKind::InsufficientResponses { want, got }
+impl<'a, Q> Serialize for RelativeUrlSerializer<'a, Q>
+where
+    Q: Serialize,
+{
+    #[inline]
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut final_url = Batch::make_url_relative(&self.endpoint_url).to_string();
+
+        let mut has_query_params = false;
+
+        // NOTE: See PendingRequest::send
+        // We may call serde_urlencoded::to_string and check for emptiness, but most
+        // requests have no query so we keep wasting calls.
+        if std::mem::size_of::<Q>() != 0 {
+            let query_string =
+                serde_urlencoded::to_string(&self.query).map_err(serde::ser::Error::custom)?;
+            // Append the serialized query string if it's not empty.
+            if !query_string.is_empty() {
+                final_url.push('?');
+                final_url.push_str(&query_string);
+                has_query_params = true;
+            }
+        }
+
+        if let Some(auth) = &self.auth {
+            use std::fmt::Write;
+            // Append '&' if query params already exist, otherwise '?'
+            final_url.push(if has_query_params { '&' } else { '?' });
+            // We assume the token is already in a format suitable for a URL.
+            write!(final_url, "access_token={auth}").map_err(|_| {
+                serde::ser::Error::custom("An error occured while formatting the access_token")
+            })?;
+        }
+
+        // Serialize the final, constructed string.
+        serializer.serialize_str(&final_url)
     }
+}
 
-    pub(crate) fn null_not_nullable() -> FromResponseErrorKind {
-        FromResponseErrorKind::NullNotNullable
+/// A wrapper to handle the specific "form-encoded" style for the request body.
+///
+/// # Panic
+/// Uses lots of fmt::Display under the hood. Most impls (inluding serde (by calling to_string) and
+/// serde_json) panic on error from Display::fmt(..) not directly from the underlying fmt::Write.
+/// This means an error during form serialization is gonna panic. This shouldn't occur if
+/// we keep accepting just payloads that claim to be JsonObjectPayload and ().
+///
+/// The cost of avoiding this is countless heap-allocations when we can simply solve it cooperatively.
+#[derive(Debug)]
+struct FormEncoded<P>(P);
+
+impl<P> FormEncoded<P> {
+    #[inline]
+    const fn is_zst(&self) -> bool {
+        // NOTE: See PendingRequest::send
+        std::mem::size_of::<P>() == 0
     }
 }
 
-impl FromResponseErrorKind {
-    pub(crate) fn error(
-        self,
-        #[cfg(debug_assertions)] endpoint: Cow<'static, str>,
-    ) -> FromResponseError {
-        FromResponseError {
-            #[cfg(debug_assertions)]
-            endpoint,
-            kind: self,
+impl<P: Serialize> Serialize for FormEncoded<P> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Man can't be too sure of himself.
+        struct DisplayCatchSerError<'a, V> {
+            value: &'a V,
+            err: std::cell::Cell<Option<serde_metaform::error::Error>>
+        }
+
+        impl<'a, V: Serialize> Display for DisplayCatchSerError<'a, V> {
+            #[inline]
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                if let Err(err) = serde_metaform::to_writer(f, self.value) {
+                    self.err.set(Some(err));       
+                }
+                Ok(())
+            }
+        }
+
+        let display = DisplayCatchSerError {
+            value: &self.0,
+            err: None.into()
+        };
+        let ok = serializer.collect_str(&display)?;
+
+        if let Some(err) = display.err.into_inner() {
+            Err(<S::Error as serde::ser::Error>::custom(format!("Error while formatting form body: {err}")))
+        } else {
+            Ok(ok)
         }
     }
 }
 
-impl From<FromResponseError> for crate::Error {
-    fn from(value: FromResponseError) -> Self {
-        crate::Error::internal(value.into())
+// SECTION: Conversion from PendingRequest to BatchSubRequest
+// ==========================================================
+
+impl<'a, P, Q> From<PendingRequest<'a, JsonObjectPayload<P>, Q>>
+    for BatchSubRequest<'a, JsonObjectPayload<P>, Q>
+{
+    #[inline]
+    fn from(req: PendingRequest<'a, JsonObjectPayload<P>, Q>) -> Self {
+        Self {
+            method: req.method,
+            relative_url: RelativeUrlSerializer {
+                endpoint_url: req.endpoint,
+                query: req.query,
+                auth: req.auth,
+            },
+            body: FormEncoded(req.payload),
+            name: None,
+            attached_files: None,
+        }
     }
 }
 
-// A custom error type for failures during batch formatting.
-// TODO: Split appropriately
+impl<'a, Q> From<PendingRequest<'a, (), Q>> for BatchSubRequest<'a, (), Q> {
+    #[inline]
+    fn from(req: PendingRequest<'a, (), Q>) -> Self {
+        Self {
+            method: req.method,
+            relative_url: RelativeUrlSerializer {
+                endpoint_url: req.endpoint,
+                query: req.query,
+                auth: req.auth,
+            },
+            body: FormEncoded(()),
+            name: None,
+            attached_files: None,
+        }
+    }
+}
+
+// SECTION: Error Handling & Utilities
+// ===================================
+
+/// An error returned when processing a batch response fails.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct BatchResponseError {
+    inner: ResponseProcessingError,
+}
+
+impl BatchResponseError {
+    /// Returns the API endpoint (if known) where this error occurred.
+    pub fn endpoint(&self) -> Option<&str> {
+        #[cfg(debug_assertions)]
+        {
+            Some(&self.inner.endpoint)
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
+    }
+}
+
+/// An internal error type for failures during batch response processing.
+/// This error indicates a problem with the structure or content of the response
+/// from the API, rather than an API-level error (like a 404).
+#[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    debug_assertions,
+    error("Error processing batch response for endpoint '{endpoint}': {kind}")
+)]
+#[cfg_attr(
+    not(debug_assertions),
+    error("Error processing batch response: {kind}")
+)]
+pub(crate) struct ResponseProcessingError {
+    /// The endpoint of the sub-request that this error corresponds to.
+    #[cfg(debug_assertions)] // maybe not the best gate
+    pub(crate) endpoint: Cow<'static, str>,
+    /// The specific kind of error that occurred.
+    #[source]
+    pub(crate) kind: ResponseProcessingErrorKind,
+}
+
+impl ResponseProcessingError {
+    pub(crate) fn new(
+        #[cfg(debug_assertions)] endpoint: Cow<'static, str>,
+        kind: ResponseProcessingErrorKind,
+    ) -> Self {
+        Self { endpoint, kind }
+    }
+}
+
+/// The specific categories of response processing errors.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ResponseProcessingErrorKind {
+    #[error("Expected {want} response(s), but only got {got}")]
+    InsufficientResponses { want: usize, got: usize },
+    #[error(
+        "The API returned a null response where a valid one was required. \
+         If this request can be null, consider using `nullable()` or `then_nullable()`."
+    )]
+    NullNotNullable,
+}
+
+/// A custom error type for failures during batch request formatting/serialization.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FormatError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-    #[error("Reqwest error: {0}")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("The request body is not a valid JSON object")]
-    InvalidBody,
+    // #[error("Reqwest error: {0}")]
+    // Reqwest(#[from] reqwest::Error),
+    // #[error("The request body is not a valid JSON object")]
+    // InvalidBody,
 }
 
-impl From<std::convert::Infallible> for FormatError {
-    fn from(value: std::convert::Infallible) -> Self {
-        match value {}
+// Conversions to the main library error type
+impl From<ResponseProcessingError> for crate::Error {
+    fn from(value: ResponseProcessingError) -> Self {
+        crate::Error::internal(value.into())
     }
 }
 
+// Conversions to the main library error type
 impl From<FormatError> for crate::Error {
     fn from(value: FormatError) -> Self {
         crate::Error::internal(value.into())
@@ -2055,17 +2227,12 @@ macro_rules! impl_flatten_base {
                     |Rest|: $($R)*,
                     |Stack|: $T
                 }) -> Self {
-                // FIXME: Compile speed (done this twice)
                 let impl_flatten_base! {
                     @stack
                     |Rest|: $($R)*,
                     |Stack|: $T
                 } = from;
                 ($T, $($R),*)
-
-                // unsafe {
-                //     std::mem::transmute(from)
-                // }
             }
         }
     };
@@ -2108,24 +2275,284 @@ impl_flatten! {
     (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11 T12 T13 T14 T15)
 }
 
-#[macro_export]
-#[doc(hidden)]
-macro_rules! reference {
-    ($req_name:tt => $target_struct:ty => $([$($field_chain:tt)*])*) => {{
-        #[allow(dead_code)]
-        fn check_field(v: $target_struct) {
-            let _ = v.$($($field_chain)*).*;
-        }
-        format!("{{result={}:$.{}}}", $req_name, stringify!($($($field_chain)*).*))
-    }}
-}
-
 #[cfg(test)]
 mod tests {
-    use reqwest::RequestBuilder;
     use serde_json::json;
 
+    use crate::{
+        app::SubscriptionField,
+        client::{ChainQuery, FieldsQuery, TupleArrayShorthand},
+        waba::PhoneNumberMetadataField,
+    };
+
     use super::*;
+
+    /// Tests the robust URL path and query extraction.
+    #[test]
+    fn test_extract_path_and_query() {
+        assert_eq!(
+            Batch::make_url_relative("https://graph.facebook.com/v18.0/me/messages"),
+            "/v18.0/me/messages"
+        );
+        assert_eq!(
+            Batch::make_url_relative("https://example.com/some/path?query=1&another=2"),
+            "/some/path?query=1&another=2"
+        );
+        assert_eq!(Batch::make_url_relative("https://example.com:8080/"), "/");
+        assert_eq!(Batch::make_url_relative("https://example.com"), "/");
+        assert_eq!(Batch::make_url_relative("http://localhost/api"), "/api");
+    }
+
+    /// Tests the serialization of `RelativeUrlSerializer`.
+    #[test]
+    fn test_relative_url_serializer() {
+        // Case 1: With query parameters only
+        let url_parts_query = RelativeUrlSerializer {
+            endpoint_url: "https://graph.facebook.com/v18.0/12344939919/subscription".to_string(),
+            query: ChainQuery {
+                a: FieldsQuery::from([SubscriptionField::Messages, SubscriptionField::Security]),
+                b: TupleArrayShorthand([("limit", 10)]),
+            },
+            auth: None,
+        };
+        let serialized_query = serde_json::to_string(&url_parts_query).unwrap();
+        assert_eq!(
+            serialized_query,
+            "\"/v18.0/12344939919/subscription?fields=messages%2Csecurity&limit=10\""
+        );
+
+        // Case 2: With auth token only
+        let url_parts_auth = RelativeUrlSerializer {
+            endpoint_url: "https://graph.facebook.com/v18.0/me".to_string(),
+            query: (), // Empty query
+            auth: Some(Cow::Owned(Auth::token("TEST_TOKEN"))),
+        };
+        let serialized_auth = serde_json::to_string(&url_parts_auth).unwrap();
+        assert_eq!(serialized_auth, "\"/v18.0/me?access_token=TEST_TOKEN\"");
+
+        // Case 3: With both query and auth token
+        let url_parts_both = RelativeUrlSerializer {
+            endpoint_url: "https://graph.facebook.com/v18.0/21231993936/phone_numbers".to_string(),
+            query: ChainQuery {
+                a: FieldsQuery::from([PhoneNumberMetadataField::VerifiedName]),
+                b: TupleArrayShorthand([("limit", 5)]),
+            },
+            auth: Some(Cow::Owned(Auth::token("ANOTHER_TOKEN"))),
+        };
+        let serialized_both = serde_json::to_string(&url_parts_both).unwrap();
+        assert_eq!(
+            serialized_both,
+            "\"/v18.0/21231993936/phone_numbers?fields=verified_name&limit=5&access_token=ANOTHER_TOKEN\""
+        );
+
+        // Case 4: With no query and no auth
+        let url_parts_none = RelativeUrlSerializer {
+            endpoint_url: "https://graph.facebook.com/v18.0/me/feed".to_string(),
+            query: (),
+            auth: None,
+        };
+        let serialized_none = serde_json::to_string(&url_parts_none).unwrap();
+        assert_eq!(serialized_none, "\"/v18.0/me/feed\"");
+    }
+
+    /// Tests the `FormEncoded` body serialization.
+    #[test]
+    fn test_form_encoded_body_serialization() {
+        #[derive(Serialize)]
+        struct Body {
+            message: &'static str,
+        }
+
+        // Test with a serializable struct
+        let form_encoded_body = FormEncoded(Body { message: "hello" });
+        let serialized = serde_json::to_string(&form_encoded_body).unwrap();
+        assert_eq!(serialized, "\"message=hello\"");
+
+        // Test with deep json
+
+        #[derive(Serialize)]
+        struct BodyJson {
+            inner: Body,
+        }
+
+        let form_encoded_empty = FormEncoded(BodyJson {
+            inner: Body { message: "hello" },
+        });
+
+        let serialized_empty = serde_json::to_string(&form_encoded_empty).unwrap();
+        assert_eq!(
+            serialized_empty,
+            r#""inner=%7B%22message%22%3A%22hello%22%7D""#
+        );
+    }
+
+    /// Tests the full serialization of a `BatchSubRequest`.
+    #[test]
+    fn test_full_sub_request_serialization() {
+        let sub_request = BatchSubRequest {
+            method: Method::POST,
+            relative_url: RelativeUrlSerializer {
+                endpoint_url: "https://graph.facebook.com/v18.0/me/messages".to_string(),
+                query: (),
+                auth: None,
+            },
+            body: FormEncoded(()),
+            name: Some(Cow::Borrowed("create-message")),
+            attached_files: Some(Cow::Borrowed("file0,file1")),
+        };
+
+        let json_string = serde_json::to_string(&sub_request).unwrap();
+        let expected = r#"{"method":"POST","relative_url":"/v18.0/me/messages","name":"create-message","attached_files":"file0,file1"}"#;
+        assert_eq!(json_string, expected);
+    }
+
+    /// Tests the file attachment logic and naming conventions.
+    #[test]
+    fn test_file_attachment_and_naming() {
+        let buffer = Vec::new();
+        let mut serializer = serde_json::Serializer::new(buffer);
+        let seq_serializer = serializer.serialize_seq(None).unwrap();
+        let mut batch_serializer = BatchSerializer::new(seq_serializer);
+
+        // Mock a pending request
+        let pending_req = BatchSubRequest {
+            method: Method::POST,
+            relative_url: RelativeUrlSerializer {
+                endpoint_url: "/me/photos".to_string(),
+                query: (),
+                auth: None,
+            },
+            body: FormEncoded(()),
+            name: None,
+            attached_files: None,
+        };
+
+        // Create a request formatter and attach files
+        batch_serializer
+            .format_request(pending_req)
+            .attach_file(None, Part::bytes(b"...")) // Should be named "file0"
+            .attach_file(Some(Cow::Borrowed("source")), Part::bytes(b"...")) // Specifically named "source"
+            .attach_file(None, Part::bytes(b"...")) // Should be named "file1"
+            .finish()
+            .unwrap();
+
+        let files = batch_serializer.finish().unwrap();
+
+        // Check that the attached files have the correct names in the multipart collection.
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].0, "file");
+        assert_eq!(files[1].0, "source");
+        assert_eq!(files[2].0, "file0");
+
+        // Now check the serialized JSON to ensure `attached_files` field is correct.
+        // The buffer contains the full JSON array: `[{...}]`
+        let buffer = serializer.into_inner();
+        let json_output = String::from_utf8(buffer).unwrap();
+        let parsed_json: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+
+        let attached_files_field = parsed_json[0]
+            .get("attached_files")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(attached_files_field, "file,source,file0");
+    }
+
+    // Helper to create a mock BatchSubResponse
+    fn create_sub_response(status_code: u16, body: &str) -> Option<BatchSubResponse> {
+        Some(BatchSubResponse {
+            status_code,
+            body: body.to_string().into_boxed_str(),
+        })
+    }
+
+    #[test]
+    fn batch_response_iterator_works_correctly() {
+        let responses_vec = vec![
+            create_sub_response(200, "{\"id\": 1}"),
+            None, // A null response
+            create_sub_response(404, "Not Found"),
+        ];
+        let mut batch_response = BatchResponse::new(responses_vec);
+
+        // First item should be Ok(Some(...))
+        let first = batch_response.next().unwrap();
+        assert!(first.is_some());
+        assert_eq!(first.unwrap().status(), StatusCode::OK);
+
+        // Second item should be Ok(None)
+        let second = batch_response.next().unwrap();
+        assert!(second.is_none());
+
+        // Third item should be Ok(Some(...)) with a 404
+        let third = batch_response.next().unwrap();
+        assert!(third.is_some());
+        let third_unwrapped = third.unwrap();
+        assert_eq!(third_unwrapped.status(), StatusCode::NOT_FOUND);
+        assert_eq!(third_unwrapped.body(), "Not Found".into());
+
+        // Iterator should be exhausted
+        assert!(batch_response.next().is_none());
+    }
+
+    #[test]
+    fn batch_sub_response_methods() {
+        let sub_response = create_sub_response(201, "Created").unwrap();
+        assert_eq!(sub_response.status(), StatusCode::CREATED);
+
+        // Test invalid status code fallback
+        let invalid_code_response = BatchSubResponse {
+            status_code: 9999, // Invalid code
+            body: "test".to_string().into_boxed_str(),
+        };
+        assert_eq!(invalid_code_response.status(), StatusCode::OK); // Falls back to default
+
+        // Test body consumption
+        let body = sub_response.body();
+        assert_eq!(body, "Created".into());
+    }
+
+    #[test]
+    fn try_next_handles_null_response() {
+        let responses_vec = vec![None];
+        let mut batch_response = BatchResponse::new(responses_vec);
+        let endpoint = Cow::from("/users/query");
+
+        // () is used for success so it expects something
+        let result = batch_response.try_next::<()>(endpoint);
+
+        match result {
+            Err(e) => {
+                assert_eq!(e.endpoint, "/users/query");
+                assert!(matches!(
+                    e.kind,
+                    ResponseProcessingErrorKind::NullNotNullable
+                ));
+            }
+            _ => panic!("Expected a NullNotNullable error"),
+        }
+    }
+
+    #[test]
+    fn try_next_handles_insufficient_responses() {
+        let responses_vec = vec![]; // No responses
+        let mut batch_response = BatchResponse::new(responses_vec);
+        let endpoint = Cow::from("/users/1");
+
+        // () is used for success so it expects something
+        let result = batch_response.try_next::<()>(endpoint);
+
+        match result {
+            Err(e) => {
+                assert_eq!(e.endpoint, "/users/1");
+                assert!(matches!(
+                    e.kind,
+                    ResponseProcessingErrorKind::InsufficientResponses { .. }
+                ));
+            }
+            _ => panic!("Expected an InsufficientResponses error"),
+        }
+    }
 
     #[derive(Clone)]
     struct SomeRequest;
@@ -2137,9 +2564,9 @@ mod tests {
 
         fn into_batch_ref(
             self,
-            _: &mut Formatter,
+            _: &mut BatchSerializer,
         ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
-            todo!()
+            panic!()
         }
 
         requests_batch_include! {}
@@ -2199,12 +2626,16 @@ mod tests {
         assert_is_requests::<crate::client::UploadMedia>();
         assert_is_requests::<crate::client::DeleteMedia>();
 
-        // Waba
+        // TODO: Waba
         // assert_is_requests::<crate::waba::ListCatalog>();
         // assert_is_requests::<crate::waba::ListNumber>();
         // assert_is_requests::<crate::waba::ListApp>();
 
-        // TODO: Add module wrappers
+        assert_is_requests::<(SomeRequest, SomeRequest)>();
+        assert_is_requests::<super::Batch<SomeRequest>>();
+        assert_is_requests::<super::Many<<Vec<SomeRequest> as IntoIterator>::IntoIter>>();
+        assert_is_requests::<super::Then<SomeRequest, SomeRequest, fn(()) -> SomeRequest>>();
+        assert_is_requests::<super::Map<SomeRequest, fn(()) -> i32>>();
     }
 
     #[test]
@@ -2221,17 +2652,18 @@ mod tests {
         assert_eq!(Batch::make_url_relative("https://graph.facebook.com"), "/");
     }
 
-    pub struct RawRequest {
-        pub request: reqwest::RequestBuilder,
-    }
+    pub struct RawRequest(PendingRequest<'static, serde_json::Value>);
 
     impl RawRequest {
-        fn new(request: reqwest::RequestBuilder) -> Self {
-            Self { request }
-        }
-
-        fn request(self) -> reqwest::RequestBuilder {
-            self.request
+        fn request(self) -> PendingRequest<'static, JsonObjectPayload<serde_json::Value>> {
+            PendingRequest {
+                method: self.0.method,
+                endpoint: self.0.endpoint,
+                auth: self.0.auth,
+                payload: JsonObjectPayload(self.0.payload),
+                query: (),
+                client: self.0.client,
+            }
         }
     }
 
@@ -2335,22 +2767,35 @@ mod tests {
         let http_client = mock_http_client();
 
         // Define two different requests.
-        let get_req = http_client.get("http://example.com/api/v1/users/1");
-        let post_req = http_client
-            .post("http://example.com/api/v1/posts")
-            .json(&json!({ "title": "Test Post&=" }));
+        let get_req = PendingRequest {
+            method: Method::GET,
+            endpoint: "http://example.com/api/v1/users/1".into(),
+            auth: None,
+            payload: serde_json::to_value(()).unwrap(),
+            query: (),
+            client: http_client.clone(),
+        };
+
+        let post_req = PendingRequest {
+            method: Method::POST,
+            endpoint: "http://example.com/api/v1/posts".into(),
+            auth: None,
+            payload: json!({ "title": "Test Post&=" }),
+            query: (),
+            client: http_client.clone(),
+        };
 
         // Create a batch and join the requests.
         let batch = client
             .batch()
-            .include(RawRequest::new(get_req))
-            .include(RawRequest::new(post_req));
+            .include(RawRequest(get_req))
+            .include(RawRequest(post_req));
 
         // Execute the batch to get the serialized bytes.
         let request_form = batch.execute().state.unwrap().form;
 
         let expected_form = batch_part!(
-            r#"[{"method":"GET","relative_url":"/api/v1/users/1"},{"method":"POST","relative_url":"/api/v1/posts","body":"title=Test%20Post%26%3D"}]"#
+            r#"[{"method":"GET","relative_url":"/api/v1/users/1","body":""},{"method":"POST","relative_url":"/api/v1/posts","body":"title=Test%20Post%26%3D"}]"#
         ).text("include_headers", "false");
 
         assert_multipart_eq!(request_form, expected_form)
@@ -2363,23 +2808,34 @@ mod tests {
         let http_client = mock_http_client();
 
         // Define two different requests.
-        let get_req = http_client
-            .get("http://example.com/api/v1/users/1")
-            .bearer_auth("TOKEN");
-        let post_req = http_client
-            .post("http://example.com/api/v1/posts")
-            .json(&json!({ "title": "Test Post" }));
+        let get_req = PendingRequest {
+            method: Method::GET,
+            endpoint: "http://example.com/api/v1/users/1".into(),
+            auth: Some(Cow::Owned(Auth::token("TOKEN"))),
+            payload: serde_json::to_value(()).unwrap(),
+            query: (),
+            client: http_client.clone(),
+        };
+
+        let post_req = PendingRequest {
+            method: Method::POST,
+            endpoint: "http://example.com/api/v1/posts".into(),
+            auth: Some(Cow::Owned(Auth::token("ParsedTOKEN").parsed().unwrap())),
+            payload: json!({ "title": "Test Post" }),
+            query: (),
+            client: http_client.clone(),
+        };
 
         // Create a batch and join the requests.
         let batch = client
             .batch()
-            .include(RawRequest::new(get_req))
-            .include(RawRequest::new(post_req));
+            .include(RawRequest(get_req))
+            .include(RawRequest(post_req));
 
         // Execute the batch to get the serialized bytes.
         let request_form = batch.execute().state.unwrap().form;
         let expected_form = batch_part!(
-            r#"[{"method":"GET","relative_url":"/api/v1/users/1?access_token=TOKEN"},{"method":"POST","relative_url":"/api/v1/posts","body":"title=Test%20Post"}]"#
+            r#"[{"method":"GET","relative_url":"/api/v1/users/1?access_token=TOKEN","body":""},{"method":"POST","relative_url":"/api/v1/posts?access_token=ParsedTOKEN","body":"title=Test%20Post"}]"#
         ).text("include_headers", "false");
 
         assert_multipart_eq!(request_form, expected_form)
@@ -2393,14 +2849,21 @@ mod tests {
 
         let user_ids = vec![1, 2, 3];
         let requests = user_ids.into_iter().map(|id| {
-            RawRequest::new(http_client.get(format!("http://example.com/api/v1/users/{}", id)))
+            RawRequest(PendingRequest {
+                method: Method::GET,
+                endpoint: format!("http://example.com/api/v1/users/{}", id),
+                auth: None,
+                payload: serde_json::to_value(()).unwrap(),
+                query: (),
+                client: http_client.clone(),
+            })
         });
 
         let batch = client.batch().include_iter(requests);
 
         let request_form = batch.execute().state.unwrap().form;
         let expected_form = batch_part!(
-            r#"[{"method":"GET","relative_url":"/api/v1/users/1"},{"method":"GET","relative_url":"/api/v1/users/2"},{"method":"GET","relative_url":"/api/v1/users/3"}]"#
+            r#"[{"method":"GET","relative_url":"/api/v1/users/1","body":""},{"method":"GET","relative_url":"/api/v1/users/2","body":""},{"method":"GET","relative_url":"/api/v1/users/3","body":""}]"#
         ).text("include_headers", "false");
 
         assert_multipart_eq!(request_form, expected_form)
@@ -2413,7 +2876,7 @@ mod tests {
         let http_client = mock_http_client();
 
         struct UploadMedia {
-            request: RequestBuilder,
+            request: PendingRequest<'static, (), ()>,
             media: Part,
         }
 
@@ -2424,16 +2887,26 @@ mod tests {
 
             fn into_batch_ref(
                 self,
-                f: &mut Formatter,
+                batch_serializer: &mut BatchSerializer,
             ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
-                f.add_request(self.request)?.binary(self.media).finish()?;
+                batch_serializer
+                    .format_request(self.request)
+                    .attach_file(None, self.media)
+                    .finish()?;
                 Ok(((), ()))
             }
 
             requests_batch_include! {}
         }
 
-        let request = http_client.post("http://example.com/upload");
+        let request = PendingRequest {
+            method: Method::POST,
+            endpoint: "http://example.com/upload".into(),
+            auth: None,
+            payload: (),
+            query: (),
+            client: http_client.clone(),
+        };
         let media = Part::bytes(b"some file content").file_name("test_file.txt");
         let batch = client.batch().include(UploadMedia { media, request });
 
@@ -2456,17 +2929,31 @@ mod tests {
         let client = mock_client().await;
         let http_client = mock_http_client();
 
-        let get_req = http_client.get("http://example.com/ok");
+        let get_req = PendingRequest {
+            method: Method::GET,
+            endpoint: "http://example.com/ok".into(),
+            auth: None,
+            payload: serde_json::to_value(()).unwrap(),
+            query: (),
+            client: http_client.clone(),
+        };
 
         // We need to simulate a serialization failure, which is hard with valid data.
         // Let's pass a non-object json
-        let post_req_with_bad_body = http_client.post("http://example.com/bad").json(&1);
+        let post_req_with_bad_body = PendingRequest {
+            method: Method::GET,
+            endpoint: "http://example.com/bad".into(),
+            auth: None,
+            payload: serde_json::to_value(1).unwrap(),
+            query: (),
+            client: http_client.clone(),
+        };
 
         // Join one good request and one bad one.
         let batch = client
             .batch()
-            .include(RawRequest::new(get_req))
-            .include(RawRequest::new(post_req_with_bad_body));
+            .include(RawRequest(get_req))
+            .include(RawRequest(post_req_with_bad_body));
 
         // The execute call should fail because of the invalid request.
         let result = batch.execute().state;

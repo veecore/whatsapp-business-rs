@@ -1,7 +1,8 @@
+// #![deny(missing_docs)]
 #![deny(clippy::future_not_send)]
+#![deny(clippy::large_enum_variant)]
 #![allow(private_bounds)]
 #![allow(private_interfaces)]
-#![allow(unexpected_cfgs)]
 #![cfg_attr(nightly_rust, feature(impl_trait_in_assoc_type))]
 
 //! # whatsapp_business_rs
@@ -335,7 +336,7 @@
 //!
 //! ### Creating a Product
 //! ```rust,no_run
-//! use whatsapp_business_rs::catalog::ProductData;
+//! use whatsapp_business_rs::catalog::{ProductData, Price};
 //! use whatsapp_business_rs::Client;
 //!
 //! # async fn create_product_example() -> Result<(), Box<dyn std::error::Error>> {
@@ -345,7 +346,7 @@
 //! let product = ProductData::default()
 //!     .name("Rust Programming Book")
 //!     .description("Learn Rust with this comprehensive guide")
-//!     .price(39.99)
+//!     .price(Price(39.99, "USD".into()))
 //!     .currency("USD")
 //!     .image_url("https://example.com/book.jpg")
 //!     .build("rust-book-001");
@@ -357,14 +358,16 @@
 //!
 //! ---
 
-pub mod app;
+#[macro_use]
+mod rest;
 #[cfg(feature = "batch")]
+#[macro_use]
 pub mod batch;
+pub mod app;
 pub mod catalog;
 pub mod client;
 pub mod error;
 pub mod message;
-mod rest;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod waba;
@@ -684,13 +687,18 @@ derive! {
 /// [`CatalogManager::list_products`]: crate::catalog::CatalogManager::list_products
 #[derive(Clone, Debug)]
 pub struct Fields<Field> {
-    pub(crate) fields: HashSet<Field>,
+    // still don't belong here
+    pub(crate) mandatory: &'static [&'static str],
+    // meta should de-dup itself
+    pub(crate) fields: Vec<Field>
+    // pub(crate) fields: HashSet<Field>,
 }
 
 impl<F> Default for Fields<F> {
     fn default() -> Self {
         Self {
-            fields: HashSet::default(),
+            fields: Vec::default(),
+            mandatory: &[],
         }
     }
 }
@@ -712,7 +720,7 @@ where
     /// # Returns
     /// The updated `Fields` instance.
     pub fn with(mut self, field: Field) -> Self {
-        self.fields.insert(field);
+        self.fields.push(field);
         self
     }
 
@@ -740,20 +748,27 @@ where
         s
     }
 
-    pub(crate) fn into_request<const N: usize>(
-        self,
-        request: RequestBuilder,
-        mandatory: [&str; N],
-    ) -> RequestBuilder {
+    pub(crate) fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Combine the mandatory fields with the optional fields from the HashSet.
         let fields_query = self
-            .fields
+            .mandatory
             .iter()
-            .map(|f| f.as_snake_case())
-            .chain(mandatory)
+            .copied() // Convert iterator of &&str to &str
+            .chain(self.fields.iter().map(|f| f.as_snake_case()))
             .collect::<Vec<_>>()
             .join(",");
 
-        request.query(&[("fields", fields_query)])
+
+        // Serialize the final string.
+        serializer.serialize_str(&fields_query)
+    }
+
+    pub(crate) fn mandatory(mut self, mandatory: &'static [&'static str]) -> Self {
+        self.mandatory = mandatory;
+        self
     }
 }
 
@@ -763,8 +778,8 @@ where
 {
     #[inline]
     fn from_iter<T: IntoIterator<Item = Field>>(iter: T) -> Self {
-        let fields = HashSet::from_iter(iter);
-        Self { fields }
+        let fields = Vec::from_iter(iter);
+        Self { fields, mandatory: &[] }
     }
 }
 
@@ -810,12 +825,12 @@ where
 /// # Usage
 ///
 /// ```rust,no_run
-/// # use whatsapp_business_rs::catalog::{CatalogManager, ProductRef};
+/// # use whatsapp_business_rs::catalog::{CatalogManager, ProductRef, Price};
 /// # async fn example_update_builder(catalog: CatalogManager<'_>, product_ref: ProductRef)
 /// # -> Result<(), Box<dyn std::error::Error>> {
 /// let updated_product_info = catalog.update_product(product_ref)
 ///      .name("Updated Product Name")
-///      .price(4999)
+///      .price(Price(4999.0, "USD".into()))
 ///      .currency("USD")
 ///      .await?; // Await to send the update
 /// # Ok(())}
@@ -833,8 +848,9 @@ where
 /// [`CatalogManager::update_product_by_id()`]: crate::catalog::CatalogManager::update_product_by_id
 #[must_use = "Update does nothing unless you `.await` or `.execute().await` it"]
 pub struct Update<'a, T, U = ()> {
-    request: Box<RequestBuilder>,
-    pub(crate) item: T,
+    // rid this struct
+
+    pub(crate) request: PendingRequest<'static, JsonObjectPayload<T>>,
     response: PhantomData<U>,
     _marker: PhantomData<&'a ()>,
 }
@@ -850,10 +866,9 @@ where
     ///
     /// # Returns
     /// An `Update<T, U>` instance.
-    pub(crate) fn new(request: RequestBuilder) -> Self {
+    pub(crate) fn new(request: PendingRequest<'static, JsonObjectPayload<T>>) -> Self {
         Self {
-            request: request.into(),
-            item: T::default(),
+            request,
             response: PhantomData,
             _marker: PhantomData,
         }
@@ -876,17 +891,17 @@ impl<T, U> Update<'_, T, U> {
     ///
     /// [`Auth`]: crate::client::Auth
     pub fn with_auth<'a>(mut self, auth: impl ToValue<'a, Auth>) -> Self {
-        *self.request = self.request.bearer_auth(auth.to_value());
+        self.request = self.request.auth(auth.to_value().into_owned());
         self
     }
 }
 
 impl<T, U> Update<'_, T, U>
 where
-    T: Serialize + Send + 'static,
+    T: Serialize + Send,
 {
-    pub(crate) fn request(self) -> RequestBuilder {
-        self.request.json(&self.item)
+    pub(crate) fn request(self) -> PendingRequest<'static, JsonObjectPayload<T>> {
+        self.request
     }
 }
 
@@ -894,8 +909,8 @@ IntoFuture! {
     impl<T, U> Update<'_, T, U>
     [
     where
-        T: Serialize + Send + 'static,
-        U: FromResponseOwned + 'static,
+        T: Serialize + Send,
+        U: FromResponseOwned,
     ]
     {
         /// Sends the update request with the configured fields.
@@ -929,8 +944,8 @@ IntoFuture! {
         /// # Ok(())}
         /// ```
         /// [`Error`]: crate::error::Error
-        pub fn execute(self) ->  impl Future<Output = Result<U, Error>> {
-            fut_net_op(self.request())
+        pub fn execute(self) ->  impl Future<Output = Result<U, Error>> + 'static {
+            execute_request(self.request())
         }
     }
 }
@@ -995,7 +1010,6 @@ pub struct FlowStepSkipped;
 #[derive(thiserror::Error, Serialize, Deserialize, PartialEq, Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct MetaError {
-    // TODO: Add detail
     pub code: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -1096,29 +1110,28 @@ impl<'a, Value> ToValue<'a, Value> for Cow<'a, Value>
 where
     Value: Clone + Send + Sync,
 {
+    #[inline]
     fn to_value(self) -> Cow<'a, Value> {
         self
     }
 }
 
-impl<'a, Value> ToValue<'a, Value> for &'a str
-where
-    Value: From<&'a str> + Clone + Send + Sync,
-{
-    #[inline]
-    fn to_value(self) -> Cow<'a, Value> {
-        Cow::Owned(Value::from(self))
+macro_rules! impl_to_value_strings {
+    ($ty:ty) => {
+        impl<'_life, 'a, Value> ToValue<'a, Value> for $ty
+        where
+            Value: From<$ty> + Clone + Send + Sync + 'a,
+        {
+            #[inline]
+            fn to_value(self) -> Cow<'a, Value> {
+                Cow::Owned(Value::from(self))
+            }
+        }
     }
 }
 
-impl<'a, Value> ToValue<'a, Value> for String
-where
-    Value: From<String> + Clone + Send + Sync + 'a,
-{
-    #[inline]
-    fn to_value(self) -> Cow<'a, Value> {
-        Cow::Owned(Value::from(self))
-    }
+impl_common_strings! {
+    impl_to_value_strings
 }
 
 impl<T: Into<String>> From<T> for IdentityRef {
@@ -1150,9 +1163,10 @@ impl<T: Into<String>> From<T> for IdentityRef {
     /// assert_eq!(business_ref.phone_id(), "123456789012345");
     /// assert_eq!(business_ref.identity_type(), IdentityType::Business);
     /// ```
+    #[inline]
     fn from(value: T) -> Self {
         let value = value.into();
-        if value.starts_with("+") {
+        if value.starts_with("+") || value.len() < 15 {
             IdentityRef::user(value)
         } else {
             IdentityRef::business(value)
@@ -1209,15 +1223,16 @@ impl<'a> ToValue<'a, Waba> for &'a Business {
     }
 }
 
+// TODO: Reduce
+use client::{JsonObjectPayload, PendingRequest};
 pub use client::{Auth, Client};
 pub use error::Error;
 pub use message::{Draft, Message};
 pub use server::{Handler as WebhookHandler, Server};
 
-use reqwest::RequestBuilder;
-use rest::{fut_net_op, macros::view_ref, FieldsTrait, FromResponse, FromResponseOwned};
+use rest::{execute_request, macros::view_ref, FieldsTrait, FromResponseOwned};
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::HashSet, fmt, marker::PhantomData, ops::Deref};
+use std::{borrow::Cow, fmt, marker::PhantomData, ops::Deref};
 
 #[cfg(test)]
 mod test {

@@ -66,20 +66,23 @@
 //! - [`WebhookConfig`] — how to configure verification
 //! - [`OnboardingFlow`] — guided flow for connecting businesses
 
-use crate::{rest::client::deserialize_str_opt, Endpoint};
+use crate::{
+    Fields,
+    client::{ChainQuery, FieldsQuery},
+    rest::client::{GrantType, WebhookConfigRequest, deserialize_str_opt},
+};
 use std::{borrow::Cow, fmt::Display, marker::PhantomData};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    App, Auth, Business, Timestamp, ToValue,
     client::{AppSecret, Client, TokenAuth},
-    derive,
     error::Error,
-    flow, fut_net_op,
+    execute_request,
     rest::client::{
         AccessTokenRequest, RegisterPhoneRequest, ShareCreditLineRequest, ShareCreditLineResponse,
     },
-    to_value, App, Auth, Business, Fields, FieldsTrait, SimpleOutput, Timestamp, ToValue,
 };
 
 /// Provides app-scoped access to WhatsApp API features
@@ -134,7 +137,7 @@ use crate::{
 /// // exchange token, subscribe, register, etc...
 /// # Ok(()) }
 /// ```
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AppManager<'i> {
     client: Client,
     app: Cow<'i, App>,
@@ -210,12 +213,11 @@ impl<'i> AppManager<'i> {
         let request = AccessTokenRequest {
             client_id: &self.app.id,
             client_secret: &app_secret.to_value().0,
-            grant_type: "fb_exchange_token",
+            grant_type: GrantType::FbExchangeToken,
             fb_exchange_token: &token.to_value(),
             ..Default::default()
         };
 
-        // TODO: Convert timestamp to unix so we get has_expired?
         self.client.get_access_token(request).await
     }
 
@@ -271,14 +273,23 @@ impl<'i> AppManager<'i> {
     where
         T: ToValue<'t, TokenAuth>,
     {
-        let token: &str = &token.to_value();
+        #[derive(Serialize)]
+        struct Request<'a> {
+            input_token: &'a str,
+        }
 
+        let token = token.to_value();
+        // TODO: Remove the async block and make returned future static.
         let request = self
             .client
             .get(self.client.endpoint().join("debug_token"))
-            .query(&[("input_token", token)]);
+            .query(Request {
+                input_token: &token,
+            });
 
-        fut_net_op(request).await
+        // TODO: This guy claims to be static I don't know why the compiler is angry.
+        let fut = execute_request(request);
+        fut.await
     }
 
     /// Retrieves a long-lived access token for this Meta App.
@@ -324,7 +335,7 @@ impl<'i> AppManager<'i> {
         let request = AccessTokenRequest {
             client_id: &self.app.id,
             client_secret: &app_secret.to_value().0,
-            grant_type: "client_credentials",
+            grant_type: GrantType::ClientCredentials,
             ..Default::default()
         };
 
@@ -337,7 +348,7 @@ impl<'i> AppManager<'i> {
     ///
     /// This method does **not** start a server or begin listening for events. It returns a builder
     /// that you can either `await` directly to register the webhook, or pass to
-    /// [`Serve::configure_webhook`] to perform registration as part of the server startup.
+    /// [`Serve::register_webhook`] to perform registration as part of the server startup.
     ///
     /// # Parameters
     /// - `config`: The webhook configuration, including the URL, and verify token.
@@ -369,7 +380,7 @@ impl<'i> AppManager<'i> {
     /// ```
     ///
     /// ## Preparing a webhook registration for server startup:
-    /// (See [`Serve::configure_webhook`] for a full example)
+    /// (See [`Serve::register_webhook`] for a full example)
     /// ```rust
     /// use whatsapp_business_rs::{Fields, app::{SubscriptionField, WebhookConfig}};
     ///
@@ -378,22 +389,24 @@ impl<'i> AppManager<'i> {
     ///      .configure_webhook(config)
     ///      .events(Fields::all());
     ///
-    /// // This `pending_registration` can now be passed to `Serve::configure_webhook`.
-    /// // DO NOT await it here if you intend to pass it to `Serve::configure_webhook`.
+    /// // This `pending_registration` can now be passed to `Serve::register_webhook`.
+    /// // DO NOT await it here if you intend to pass it to `Serve::register_webhook`.
     /// # }
     /// ```
     ///
     /// [`Fields`]: crate::Fields
     /// [`SubscriptionField`]: crate::app::SubscriptionField
-    /// [`Serve::configure_webhook`]: crate::server::Serve::configure_webhook
+    /// [`Serve::register_webhook`]: crate::server::Serve::register_webhook
     pub fn configure_webhook<'c, C>(&self, config: C) -> ConfigureWebhook<'c>
     where
         C: ToValue<'c, WebhookConfig>,
     {
+        let query = config.to_value().into();
         let request = self
             .client
             .post(self.endpoint("subscriptions"))
-            .query(&config.to_value().to_request());
+            .query(query)
+            .chain_query(FieldsQuery::base(&[]));
 
         ConfigureWebhook {
             request,
@@ -429,7 +442,7 @@ impl<'i> AppManager<'i> {
                 .join("subscribed_apps"),
         );
 
-        fut_net_op(request).await
+        execute_request(request).await
     }
 
     Endpoint! {app.id}
@@ -541,6 +554,16 @@ impl ToValue<'_, Auth> for &Token {
     }
 }
 
+impl<I: Into<String>> From<I> for Token {
+    fn from(value: I) -> Self {
+        Self {
+            access_token: value.into(),
+            token_type: TokenType::Bearer,
+            expires_in: None,
+        }
+    }
+}
+
 /// Debug token information
 #[derive(Deserialize, Clone, Debug)]
 #[non_exhaustive]
@@ -599,6 +622,7 @@ where
 }
 
 SimpleOutput! {
+    {Query: ChainQuery<WebhookConfigRequest<'a>, FieldsQuery<SubscriptionField>>}
     ConfigureWebhook<'a> => ()
 }
 
@@ -674,7 +698,7 @@ impl<'a> ConfigureWebhook<'a> {
     ///
     /// [`Fields`]: crate::Fields
     pub fn events(mut self, events: Fields<SubscriptionField>) -> Self {
-        self.request = events.into_request(self.request, []);
+        self.request.query.b = self.request.query.b.join(events);
         self
     }
 }
@@ -685,9 +709,9 @@ impl<'a, 'b> OnboardingFlow<'a, 'b> {
             manager,
             business,
             access_token: (),
-            subscribe: (),
-            register: (),
-            share_credit_line: (),
+            subscribe_success: (),
+            register_success: (),
+            allocation_config_id: (),
         }
     }
 }
@@ -701,9 +725,9 @@ flow! {
     #[must_use = "OnboardingFlow's steps need to be completed"]
     pub struct OnboardingFlow<'a, 'b, S1, S2, S3, S4> {
         access_token: S1,
-        subscribe: S2,
-        register: S3,
-        share_credit_line: S4,
+        subscribe_success: S2,
+        register_success: S3,
+        allocation_config_id: S4,
 
         manager: &'a AppManager<'a>,
         business: Cow<'b, Business>,
@@ -753,9 +777,9 @@ flow! {
 
         let request = client
             .post(url)
-            .bearer_auth(&self.access_token);
+            .auth(&self.access_token);
 
-        (fut_net_op(request).await?, self)
+        (execute_request(request).await?, self)
     }
 
     /// Step 3: Registers the phone number for WhatsApp use.
@@ -778,10 +802,10 @@ flow! {
 
         let request = client
             .post(url)
-            .bearer_auth(&self.access_token)
-            .json(&request);
+            .auth(&self.access_token)
+            .json(request);
 
-        (fut_net_op(request).await?, self)
+        (execute_request(request).await?, self)
     }
 
     /// Step 4: Optionally shares a credit line with the business account.
@@ -814,7 +838,7 @@ flow! {
             .post(url)
             .query(&payload);
 
-        let res: ShareCreditLineResponse = fut_net_op(request).await?;
+        let res: ShareCreditLineResponse = execute_request(request).await?;
 
         (res.allocation_config_id, self)
     }
@@ -830,7 +854,7 @@ impl<T> OnboardingFlow<'_, '_, Token, PhantomData<()>, PhantomData<()>, T> {
     pub fn finalize(self) -> BusinessOnboardingResult<T> {
         BusinessOnboardingResult {
             access_token: self.access_token,
-            allocation_config_id: self.share_credit_line,
+            allocation_config_id: self.allocation_config_id,
         }
     }
 }
@@ -852,7 +876,7 @@ derive! {
     ///
     /// This enum lists all the possible event types (also known as "fields") that
     /// can be subscribed to when configuring a webhook with [`AppManager::configure_webhook`] or
-    /// as part of the server setup with [`Serve::configure_webhook`].
+    /// as part of the server setup with [`Serve::register_webhook`].
     ///
     /// These fields determine what kinds of notifications your webhook will receive
     /// from Meta’s servers.
@@ -870,7 +894,7 @@ derive! {
     ///
     /// [`Fields`]: crate::Fields
     /// [`AppManager::configure_webhook`]: crate::app::AppManager::configure_webhook
-    /// [`Serve::configure_webhook`]: crate::server::Serve::configure_webhook
+    /// [`Serve::register_webhook`]: crate::server::Serve::register_webhook
     #[derive(#FieldsTrait, Serialize, PartialEq, Eq, Hash, Clone, Copy, Debug)]
     #[serde(rename_all = "snake_case")]
     pub enum SubscriptionField {

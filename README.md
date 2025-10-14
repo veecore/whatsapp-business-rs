@@ -364,7 +364,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### 🔹 Create a Product
 
 ```rust
-use whatsapp_business_rs::catalog::ProductData;
+use whatsapp_business_rs::catalog::{ProductData, Price};
 use whatsapp_business_rs::Client;
 
 #[tokio::main]
@@ -373,7 +373,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let product = ProductData::default()
         .name("Rust Programming Book")
         .description("Learn Rust with this comprehensive guide")
-        .price(39.99)
+        .price(Price(39.99, "USD".into()))
         .currency("USD")
         .image_url("https://example.com/book.jpg")
         .build("rust-book-001");

@@ -134,8 +134,9 @@ impl Server {
 }
 
 // Verification handler
+#[allow(clippy::owned_cow)]
 async fn handle_verification<V, H>(
-    State(state): State<Arc<InnerServer<H, V, String>>>,
+    State(state): State<Arc<InnerServer<H, V, Cow<'static, String>>>>,
     query: Query<HashMap<String, String>>,
 ) -> impl IntoResponse
 where
@@ -149,7 +150,7 @@ where
     };
 
     // Verify the token matches our secret and echo
-    if challenge.hub_verify_token == state.verify_token {
+    if challenge.hub_verify_token == *state.verify_token {
         (StatusCode::OK, challenge.hub_challenge)
     } else {
         error!(state =>
@@ -231,7 +232,6 @@ fn verify_signature(secret: &AppSecret, headers: &HeaderMap, body: &[u8]) -> Res
         .to_str()
         .map_err(|_| "Invalid signature header".to_owned())?;
 
-    // TODO: reuse mac?
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.0.as_bytes())
         .map_err(|_| "Invalid webhook secret".to_owned())?;
 
@@ -942,6 +942,59 @@ mod tests {
           ]
         }
     }
+
+    // test_payload! {
+    //     |interactive_flow_reply|: {
+    //         "object": "whatsapp_business_account",
+    //         "entry": [
+    //         {
+    //             "id": "WHATSAPP_BUSINESS_ACCOUNT_ID",
+    //             "changes": [
+    //             {
+    //                 "value":
+    //                 {
+    //                     "messaging_product": "whatsapp",
+    //                     "metadata":
+    //                     {
+    //                         "display_phone_number": "PHONE_NUMBER",
+    //                         "phone_number_id": "PHONE_NUMBER_ID"
+    //                     },
+    //                     "contacts": [
+    //                     {
+    //                         "profile":
+    //                         {
+    //                             "name": "NAME"
+    //                         },
+    //                         "wa_id": "WHATSAPP_ID"
+    //                     }],
+    //                     "messages": [
+    //                     {
+    //                         "context":
+    //                         {
+    //                             "from": "16315558151",
+    //                             "id": "gBGGEiRVVgBPAgm7FUgc73noXjo"
+    //                         },
+    //                         "from": "<USER_ACCOUNT_NUMBER>",
+    //                         "id": "<MESSAGE_ID>",
+    //                         "type": "interactive",
+    //                         "interactive":
+    //                         {
+    //                             "type": "nfm_reply",
+    //                             "nfm_reply":
+    //                             {
+    //                                 "name": "flow",
+    //                                 "body": "Sent",
+    //                                 "response_json": "{\"flow_token\": \"<FLOW_TOKEN>\", \"optional_param1\": \"<value1>\", \"optional_param2\": \"<value2>\"}"
+    //                             }
+    //                         },
+    //                         "timestamp": "<MESSAGE_SEND_TIMESTAMP>"
+    //                     }]
+    //                 },
+    //                 "field": "messages"
+    //             }]
+    //         }]
+    //     }
+    // }
 
     test_payload! {
         |location_message|: {

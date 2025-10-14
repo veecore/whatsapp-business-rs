@@ -64,12 +64,10 @@ use std::{borrow::Cow, marker::PhantomData};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::{Client, Endpoint},
-    derive,
-    error::Error,
-    flow, fut_net_op,
+    client::{Client, Endpoint, FieldsQuery},
+    execute_request,
     rest::client::RegisterPhoneRequest,
-    view_ref, CatalogRef, Endpoint, Fields, SimpleStreamOutput, ToValue, Waba,
+    view_ref, CatalogRef, Fields, ToValue, Waba,
 };
 
 ///
@@ -110,7 +108,7 @@ use crate::{
 /// println!("Registered number: {}", flow.phone_number_id);
 /// # Ok(()) }
 /// ```
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct WabaManager<'i> {
     client: Client,
     of: Cow<'i, Waba>,
@@ -156,7 +154,7 @@ impl<'i> WabaManager<'i> {
     /// [`Catalog`]: crate::waba::Catalog
     pub fn list_catalogs(&self) -> ListCatalog {
         let url = self.endpoint("product_catalogs");
-        let request = self.client.get(url);
+        let request = self.client.get(url).query(FieldsQuery::base(&["id"]));
         ListCatalog { request }
     }
 
@@ -187,8 +185,7 @@ impl<'i> WabaManager<'i> {
     /// ```
     pub fn list_phone_numbers(&self) -> ListNumber {
         let url = self.endpoint("phone_numbers");
-        let request = self.client.get(url);
-
+        let request = self.client.get(url).query(FieldsQuery::base(&["id"]));
         ListNumber { request }
     }
 
@@ -220,8 +217,39 @@ impl<'i> WabaManager<'i> {
     pub fn list_subcribed_apps(&self) -> ListApp {
         let url = self.endpoint("subscribed_apps");
         let request = self.client.get(url);
-
         ListApp { request }
+    }
+
+    /// Prepares a request to list all flows attached to this WhatsApp Business Account (WABA).
+    ///
+    /// This method returns a [`ListFlow`] builder. To retrieve flows,
+    /// call `.into_stream()` on the builder and then iterate over the stream.
+    /// You can select which metadata fields to include per flow using the `metadata()` method.
+    ///
+    /// # Returns
+    /// A [`ListFlow`] builder, which can be configured and then converted
+    /// into an asynchronous stream of [`FlowInfo`] items.
+    ///
+    /// # Example
+    /// ```rust
+    /// use whatsapp_business_rs::waba::FlowInfoMetadataField;
+    /// use futures::TryStreamExt as _;
+    ///
+    /// # async fn example(manager: whatsapp_business_rs::waba::WabaManager<'_>) -> Result<(), Box<dyn std::error::Error>> {    
+    /// manager.list_flows()
+    ///      .into_stream()
+    ///      .try_for_each(|flow| async move {
+    ///          println!("{:?}", flow);
+    ///          Ok(())
+    ///      })
+    ///      .await?;
+    /// # Ok(())}
+    /// ```
+    pub fn list_flows(&self) -> ListFlow {
+        let url = self.endpoint("flows");
+        let request = self.client.get(url).query(FieldsQuery::base(&["id", "name"]));
+
+        ListFlow { request }
     }
 
     /// Initiates the registration process for a new phone number.
@@ -275,7 +303,7 @@ impl<'i> WabaManager<'i> {
 }
 
 SimpleStreamOutput! {
-    ListCatalog => Catalog
+    {Query: FieldsQuery<CatalogMetadataField>} ListCatalog => Catalog
 }
 
 impl ListCatalog {
@@ -292,13 +320,13 @@ impl ListCatalog {
     /// [`Fields`]: crate::Fields
     /// [`CatalogMetadataField`]: crate::waba::CatalogMetadataField
     pub fn metadata(mut self, metadata: Fields<CatalogMetadataField>) -> Self {
-        self.request = metadata.into_request(self.request, ["id"]);
+        self.request.query = self.request.query.join(metadata);
         self
     }
 }
 
 SimpleStreamOutput! {
-    ListNumber => PhoneNumber
+    {Query: FieldsQuery<PhoneNumberMetadataField>} ListNumber => PhoneNumber
 }
 
 impl ListNumber {
@@ -315,7 +343,7 @@ impl ListNumber {
     /// [`Fields`]: crate::Fields
     /// [`PhoneNumberMetadataField`]: crate::waba::PhoneNumberMetadataField
     pub fn metadata(mut self, metadata: Fields<PhoneNumberMetadataField>) -> Self {
-        self.request = metadata.into_request(self.request, ["id"]);
+        self.request.query = self.request.query.join(metadata);
         self
     }
 }
@@ -346,7 +374,7 @@ pub struct Catalog {
 }
 
 derive! {
-    #[derive(#crate::Fields, Deserialize, PartialEq, Clone, Debug, Default)]
+    #[derive(#Fields, Deserialize, PartialEq, Clone, Debug, Default)]
     #[non_exhaustive]
     pub struct CatalogMetadata {
         #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -373,6 +401,54 @@ impl Catalog {
         CatalogRef {
             id: self.id.clone(),
         }
+    }
+}
+
+SimpleStreamOutput! {
+    {Query: FieldsQuery<FlowInfoMetadataField>} ListFlow => FlowInfo
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct FlowInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(flatten)]
+    pub metadata: FlowInfoMetadata,
+}
+
+derive! {
+    #[derive(#Fields, Deserialize, PartialEq, Clone, Debug, Default)]
+    #[non_exhaustive]
+    pub struct FlowInfoMetadata {
+        #[serde(default)]
+        pub categories: Vec<String>,
+        #[serde(default)]
+        pub status: Option<String>,
+        #[serde(default)]
+        pub json_version: Option<String>,
+        #[serde(default)]
+        pub data_api_version: Option<String>,
+        #[serde(default)]
+        pub endpoint_uri: Option<String>,
+    }
+}
+
+impl ListFlow {
+    /// Specifies which metadata fields to include for each flow in the response.
+    ///
+    /// If not called, a default set of fields will be returned.
+    ///
+    /// # Parameters
+    /// - `fields`: A [`Fields`] struct containing the desired [`FlowInfoMetadataField`]s.
+    ///
+    /// # Returns
+    /// The updated builder instance.
+    ///
+    /// [`Fields`]: crate::Fields
+    /// [`FlowInfoMetadataField`]: crate::waba::FlowInfoMetadataField
+    pub fn metadata(mut self, metadata: Fields<FlowInfoMetadataField>) -> Self {
+        self.request.query = self.request.query.join(metadata);
+        self
     }
 }
 
@@ -456,7 +532,7 @@ pub struct PhoneNumber {
 }
 
 derive! {
-    #[derive(#crate::Fields, Deserialize, Debug, Default)]
+    #[derive(#Fields, Deserialize, Debug, Default)]
     #[non_exhaustive]
     pub struct PhoneNumberMetadata {
         #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -505,9 +581,9 @@ impl<'a, 'b> NumberRegistrationFlow<'a, 'b> {
             manager,
             number,
             phone_number_id: (),
-            pending_verify: (),
-            verify: (),
-            _complete: (),
+            verification_code_success: (),
+            verification_success: (),
+            set_pin_success: (),
         }
     }
 }
@@ -530,9 +606,9 @@ flow! {
     #[must_use = "NumberRegistrationFlow's steps need to be completed"]
     pub struct NumberRegistrationFlow<'a, 'b, S1, S2, S3, S4> {
         phone_number_id: S1,
-        pending_verify: S2,
-        verify: S3,
-        _complete: S4,
+        verification_code_success: S2,
+        verification_success: S3,
+        set_pin_success: S4,
 
         manager: &'a WabaManager<'a>,
         number: &'b UnverifiedPhoneNumber,
@@ -553,7 +629,7 @@ flow! {
             .post(url)
             .json(&self.number);
 
-        let res: RegisterResponse = fut_net_op(request).await?;
+        let res: RegisterResponse = execute_request(request).await?;
 
         (res.id, self)
     }
@@ -575,11 +651,12 @@ flow! {
     ) -> PhantomData<()> {
         let client = &self.manager.client;
 
+        // TODO: Check if this should be json
         let request = client
             .post(self.endpoint("request_code"))
-            .query(&[("code_method", method.as_str()), ("language", language)]);
+            .query([("code_method", method.as_str()), ("language", language)]);
 
-        (fut_net_op(request).await?, self)
+        (execute_request(request).await?, self)
     }
 
     /// Step 3: Confirms the number using the code sent.
@@ -596,11 +673,12 @@ flow! {
     {
         let client = &self.manager.client;
 
+        // TODO: Check if this should be json
         let request = client
             .post(self.endpoint("verify_code"))
-            .query(&[("code", code)]);
+            .query([("code", code)]);
 
-        (fut_net_op(request).await?, self)
+        (execute_request(request).await?, self)
     }
 
     /// Step 4: Finalizes phone number registration with optional 2FA PIN.
@@ -625,12 +703,12 @@ flow! {
         // verification PIN.
         let request = RegisterPhoneRequest::from_pin(pin);
 
-        let url = self.manager.endpoint("register");
+        let url = self.endpoint("register");
         let request = client
             .post(url)
             .json(&request);
 
-        (fut_net_op(request).await?, self)
+        (execute_request(request).await?, self)
     }
 }
 
@@ -683,7 +761,7 @@ impl<'a> ToValue<'a, Waba> for WabaManager<'a> {
     }
 }
 
-impl<'a> ToValue<'a, Waba> for &'a WabaManager<'a> {
+impl<'a, 'b> ToValue<'a, Waba> for &'a WabaManager<'b> {
     #[inline]
     fn to_value(self) -> Cow<'a, Waba> {
         Cow::Borrowed(self.of.as_ref())

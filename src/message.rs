@@ -97,16 +97,13 @@
 
 use crate::client::{Auth, SendMessage};
 use crate::rest::client::{
-    deserialize_interactive_action, deserialize_str, serialize_interactive_action,
-    serialize_ordinary_text, serialize_str, serialize_text_text, serialize_text_text_opt,
-    DownloadMedia as InnerDownloadMedia, DownloadMediaUrl,
+    DownloadMedia as InnerDownloadMedia, DownloadMediaFromUrl, deserialize_interactive_action,
+    deserialize_str, serialize_interactive_action, serialize_ordinary_text, serialize_str,
+    serialize_text_text, serialize_text_text_opt,
 };
 use crate::rest::option_from_response_default;
-use crate::{catalog::ProductRef, client::Client, error::Error, Identity, IdentityRef};
-use crate::{
-    derive, enum_traits, AnyField, CatalogRef, ContentTraits, DeserializeAdjacent, FromResponse,
-    IntoFuture, IntoRequest, MetaError, SerializeAdjacent, Timestamp, ToValue,
-};
+use crate::{CatalogRef, MetaError, Timestamp, ToValue};
+use crate::{Identity, IdentityRef, catalog::ProductRef, client::Client, error::Error};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::ops::Deref;
@@ -237,7 +234,7 @@ impl Content {
             let resolve = match media_source {
                 MediaSource::Id(id) => DownloadMediaResolve::Id(client.download_media(id, dst)),
                 MediaSource::Link(url) => {
-                    DownloadMediaResolve::Url(client.download_media_url(url, dst))
+                    DownloadMediaResolve::Url(client.download_media_from_url(url, dst))
                 }
                 MediaSource::Bytes(_) => return None,
             };
@@ -265,7 +262,7 @@ pub struct DownloadMedia<'dst, Dst> {
 
 enum DownloadMediaResolve<'dst, Dst> {
     Id(InnerDownloadMedia<'dst, Dst>),
-    Url(DownloadMediaUrl<'dst, Dst>),
+    Url(DownloadMediaFromUrl<'dst, Dst>),
 }
 
 impl<Dst> DownloadMedia<'_, Dst> {
@@ -329,16 +326,18 @@ IntoFuture! {
         /// ```
         /// [`Error`]: crate::error::Error
         #[inline]
-        pub async fn execute(self) -> Result<(), Error> {
-            match *self.resolve {
-                DownloadMediaResolve::Id(download_media) => {
-                    download_media.execute().await?;
-                }
-                DownloadMediaResolve::Url(download_media_url) => {
-                    download_media_url.execute().await?;
-                }
-            };
-            Ok(())
+        pub fn execute(self) -> impl Future<Output = Result<(), Error>> + 'dst {
+            async move {
+                match *self.resolve {
+                    DownloadMediaResolve::Id(download_media) => {
+                        download_media.execute().await?;
+                    }
+                    DownloadMediaResolve::Url(download_media_url) => {
+                        download_media_url.execute().await?;
+                    }
+                };
+                Ok(())
+            }
         }
     }
 }
@@ -394,6 +393,7 @@ impl Media {
     ///     "application/pdf".parse().unwrap(),
     /// ).filename("MyReport.pdf");
     /// ```
+    #[inline]
     pub fn new(media_source: impl Into<MediaSource>, media_type: MediaType) -> Self {
         Self {
             media_source: media_source.into(),
@@ -423,6 +423,7 @@ impl Media {
     ///
     /// let pdf_document = Media::pdf("https://example.com/report.pdf", "MyReport.pdf");
     /// ```
+    #[inline]
     pub fn pdf(media_source: impl Into<MediaSource>, filename: impl Into<String>) -> Self {
         Self::new(media_source, MediaType::Document(DocumentExtension::Pdf)).filename(filename)
     }
@@ -446,6 +447,7 @@ impl Media {
     ///
     /// let jpeg_image = Media::jpeg("11133444488849");
     /// ```
+    #[inline]
     pub fn jpeg(media_source: impl Into<MediaSource>) -> Self {
         Self::new(media_source, MediaType::Image(ImageExtension::Jpeg))
     }
@@ -469,6 +471,7 @@ impl Media {
     ///
     /// let jpeg_image = Media::png("11133444488849");
     /// ```
+    #[inline]
     pub fn png(media_source: impl Into<MediaSource>) -> Self {
         Self::new(media_source, MediaType::Image(ImageExtension::Png))
     }
@@ -492,6 +495,7 @@ impl Media {
     ///
     /// let webp_sticker = Media::sticker("https://example.com/sticker.webp");
     /// ```
+    #[inline]
     pub fn sticker(media_source: impl Into<MediaSource>) -> Self {
         Self::new(media_source, MediaType::Sticker(StickerExtension::Webp))
     }
@@ -516,6 +520,7 @@ impl Media {
     ///
     /// let mp4_video = Media::mp4(image_bytes);
     /// ```
+    #[inline]
     pub fn mp4(media_source: impl Into<MediaSource>) -> Self {
         Self::new(media_source, MediaType::Video(VideoExtension::Mp4))
     }
@@ -545,6 +550,7 @@ impl Media {
     /// # }
     /// ```
     #[cfg(feature = "media_ext")]
+    #[inline]
     pub async fn from_path(path: impl AsRef<Path> + Send) -> Result<Self, MediaFromPathError> {
         let path_ref = path.as_ref();
         let data = tokio::fs::read(path_ref)
@@ -584,6 +590,7 @@ impl Media {
     /// # }
     /// ```
     #[cfg(feature = "media_ext")]
+    #[inline]
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, MediaInferError> {
         let mime_type = infer::get(&data)
             .map(|kind| kind.mime_type())
@@ -603,6 +610,7 @@ impl Media {
     ///
     /// The caption will be displayed alongside the media in the message.
     /// Note: Captions are not supported for **audio** or **sticker** media types.
+    #[inline]
     pub fn caption(mut self, caption: impl Into<Text>) -> Self {
         if !self.is_audio() && !self.is_sticker() {
             self.caption = Some(caption.into());
@@ -613,6 +621,7 @@ impl Media {
     /// Suggests a **filename** for the recipient when downloading the media.
     ///
     /// This is only applicable and visible for **document** media types.
+    #[inline]
     pub fn filename(mut self, filename: impl Into<String>) -> Self {
         if self.is_document() {
             self.filename = Some(filename.into());
@@ -636,6 +645,7 @@ impl Media {
     /// let image_media = Media::jpeg("https://example.com/photo.jpg");
     /// assert_eq!(image_media.is_audio(), false);
     /// ```
+    #[inline]
     pub fn is_audio(&self) -> bool {
         matches!(self.media_type, MediaType::Audio(_))
     }
@@ -656,6 +666,7 @@ impl Media {
     /// let video_media = Media::mp4("https://example.com/video.mp4");
     /// assert_eq!(video_media.is_document(), false);
     /// ```
+    #[inline]
     pub fn is_document(&self) -> bool {
         matches!(self.media_type, MediaType::Document(_))
     }
@@ -676,6 +687,7 @@ impl Media {
     /// let sticker_media = Media::sticker("some_sticker_id");
     /// assert_eq!(sticker_media.is_image(), false);
     /// ```
+    #[inline]
     pub fn is_image(&self) -> bool {
         matches!(self.media_type, MediaType::Image(_))
     }
@@ -696,6 +708,7 @@ impl Media {
     /// let audio_media = Media::new("some_audio_id", "audio/ogg".parse().unwrap());
     /// assert_eq!(audio_media.is_sticker(), false);
     /// ```
+    #[inline]
     pub fn is_sticker(&self) -> bool {
         matches!(self.media_type, MediaType::Sticker(_))
     }
@@ -716,10 +729,12 @@ impl Media {
     /// let document_media = Media::pdf("some_doc_id", "report.pdf");
     /// assert_eq!(document_media.is_video(), false);
     /// ```
+    #[inline]
     pub fn is_video(&self) -> bool {
         matches!(self.media_type, MediaType::Video(_))
     }
 
+    #[inline]
     pub fn into_upload_parts(self) -> Option<(Vec<u8>, MediaType, Cow<'static, str>)> {
         match self.media_source {
             MediaSource::Bytes(bytes) => {
@@ -787,6 +802,7 @@ impl Text {
     /// assert_eq!(message.body, "Just some plain text.");
     /// assert_eq!(message.preview_url, Some(false));
     /// ```
+    #[inline]
     pub fn new(body: impl Into<String>, preview_url: bool) -> Self {
         Self {
             body: body.into(),
@@ -794,6 +810,7 @@ impl Text {
         }
     }
 
+    #[inline]
     pub fn preview_url(mut self, preview_url: bool) -> Self {
         self.preview_url = Some(preview_url);
         self
@@ -812,6 +829,7 @@ impl<S: Into<String>> From<S> for Text {
     /// Converts a string-like type into a `Text` message.
     ///
     /// The `preview_url` will be `None` by default.
+    #[inline]
     fn from(value: S) -> Self {
         Text {
             body: value.into(),
@@ -840,6 +858,7 @@ pub struct Reaction {
 }
 
 impl Reaction {
+    #[inline]
     pub fn new<'m, T>(emoji: char, to: T) -> Self
     where
         T: ToValue<'m, MessageRef>,
@@ -887,6 +906,7 @@ pub struct Location {
 }
 
 impl Location {
+    #[inline]
     pub fn new(latitude: f64, longitude: f64) -> Self {
         Self {
             latitude,
@@ -896,11 +916,13 @@ impl Location {
         }
     }
 
+    #[inline]
     pub fn name(mut self, location_name: impl Into<String>) -> Self {
         self.name = Some(location_name.into());
         self
     }
 
+    #[inline]
     pub fn address(mut self, location_address: impl Into<String>) -> Self {
         self.address = Some(location_address.into());
         self
@@ -956,12 +978,14 @@ impl MediaSource {
 }
 
 impl From<Vec<u8>> for MediaSource {
+    #[inline]
     fn from(value: Vec<u8>) -> Self {
         Self::Bytes(value)
     }
 }
 
 impl From<&str> for MediaSource {
+    #[inline]
     fn from(value: &str) -> Self {
         // We used to fully parse as url::Url here but
         // now we make it cheaper since the ids are currently
@@ -975,6 +999,7 @@ impl From<&str> for MediaSource {
 }
 
 impl From<String> for MediaSource {
+    #[inline]
     fn from(value: String) -> Self {
         // We used to fully parse as url::Url here but
         // now we make it cheaper since the ids are currently
@@ -1002,6 +1027,7 @@ pub enum MediaType {
 
 impl MediaType {
     /// Returns the standard MIME type string for the given media type and extension.
+    #[inline]
     pub fn mime_type(self) -> Cow<'static, str> {
         match self {
             MediaType::Audio(ext) => ext.mime_type().into(),
@@ -1016,6 +1042,7 @@ impl MediaType {
 impl FromStr for MediaType {
     type Err = String;
 
+    #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (main, _) = s
             .split_once('/')
@@ -1064,6 +1091,7 @@ macro_rules! declare_extensions {
             }
 
             impl $name {
+                #[inline]
                 fn mime_type(self) -> &'static str {
                     match self {
                         $(
@@ -1072,6 +1100,7 @@ macro_rules! declare_extensions {
                     }
                 }
 
+                #[inline]
                 fn from_mime_type(mime_type: &str) -> Option<Self> {
                     match mime_type {
                         $(
@@ -1143,6 +1172,7 @@ derive! {
     /// [`Button::Option`]: crate::message::Button::Option
     #[derive(#FromResponse, #IntoRequest, PartialEq, Clone, Debug)]
     #![serde(untagged)]
+    #[non_exhaustive]
     pub enum InteractiveContent {
         /// Interactive message sent to user
         Message(InteractiveMessage),
@@ -1152,6 +1182,7 @@ derive! {
 }
 
 impl<I: Into<InteractiveMessage>> From<I> for InteractiveContent {
+    #[inline]
     fn from(value: I) -> Self {
         InteractiveContent::Message(value.into())
     }
@@ -1176,6 +1207,7 @@ derive! {
 }
 
 impl From<Media> for InteractiveHeader {
+    #[inline]
     fn from(value: Media) -> Self {
         Self::Media(InteractiveHeaderMedia {
             media_source: value.media_source,
@@ -1226,6 +1258,7 @@ pub struct InteractiveHeaderMedia {
 }
 
 impl From<Media> for InteractiveHeaderMedia {
+    #[inline]
     fn from(value: Media) -> Self {
         InteractiveHeaderMedia {
             media_source: value.media_source,
@@ -1235,6 +1268,7 @@ impl From<Media> for InteractiveHeaderMedia {
 }
 
 impl InteractiveHeaderMedia {
+    #[inline]
     pub fn new(media_source: impl Into<MediaSource>, media_type: MediaType) -> Self {
         Self {
             media_source: media_source.into(),
@@ -1244,33 +1278,40 @@ impl InteractiveHeaderMedia {
 }
 
 derive! {
-    /// Outgoing interactive message structure
+    /// An outgoing interactive message.
     ///
-    /// Use this to send a message with buttons, catalog links, or CTA actions.
-    /// You can optionally include a header and footer to customize appearance.
+    /// Use this to send a message with buttons, product lists, or other interactive elements.
+    /// You can optionally include a header and footer to customize its appearance.
     ///
-    /// # Fields
-    /// - `action`: Interactive element (e.g. buttons, product list)
-    /// - `header`: Optional top content (media or text)
-    /// - `body`: Main message body
-    /// - `footer`: Optional footer text (e.g. disclaimer)
+    /// ## Easy Creation with Tuples
     ///
-    /// # Example (Basic Interactive Message)
+    /// For convenience, you can create an interactive message `Draft` directly from tuples.
+    /// The tuple elements correspond to the message parts in the order they are generally displayed,
+    /// which makes creation intuitive:
+    ///
+    /// - **`(Header, Body, Action, Footer)`**
+    /// - **`(Body, Action, Footer)`**
+    /// - **`(Body, Action)`**
+    ///
+    /// This is the recommended way to create interactive messages.
+    ///
+    /// # Example (using tuples)
     /// ```rust,no_run
     /// use whatsapp_business_rs::message::{InteractiveMessage, InteractiveAction, Button, Text};
     ///
-    /// let buttons = vec![
+    /// let buttons = [
     ///     Button::reply("yes_id", "Yes"),
     ///     Button::reply("no_id", "No"),
     /// ];
     ///
-    /// let interactive_msg = InteractiveMessage::new(
-    ///     InteractiveAction::Keyboard(buttons.into()),
-    ///     Text::from("Do you want to proceed?")
-    /// )
-    /// .footer(Text::from("This is a test message."));
+    /// // Create a draft from a (Body, Action, Footer) tuple.
+    /// let interactive_msg = (
+    ///     Text::from("Do you want to proceed?"),
+    ///     InteractiveAction::from(buttons),
+    ///     Text::from("This is a test message."),
+    /// );
     ///
-    /// // You would then use this `interactive_msg` inside a `Draft::interactive()` to send it.
+    /// // You can now send this interactive_msg directly as an outgoing message.
     /// ```
     #[derive(#FromResponse, #IntoRequest, PartialEq, Clone, Debug)]
     #[non_exhaustive]
@@ -1365,6 +1406,7 @@ impl InteractiveMessage {
     /// A new `InteractiveMessage` instance.
     ///
     /// [`InteractiveAction`]: crate::message::InteractiveAction
+    #[inline]
     pub fn new(action: impl Into<InteractiveAction>, body: impl Into<Text>) -> Self {
         Self {
             action: action.into(),
@@ -1375,12 +1417,14 @@ impl InteractiveMessage {
     }
 
     /// Add a footer to the message
+    #[inline]
     pub fn footer(mut self, footer: impl Into<Text>) -> Self {
         self.footer = Some(footer.into());
         self
     }
 
     /// Add a header to the message
+    #[inline]
     pub fn header(mut self, header: impl Into<InteractiveHeader>) -> Self {
         self.header = Some(header.into());
         self
@@ -1418,6 +1462,7 @@ pub struct Keyboard {
 }
 
 impl Keyboard {
+    #[inline]
     pub fn new<I, B>(buttons: I) -> Self
     where
         I: IntoIterator<Item = B>,
@@ -1486,6 +1531,7 @@ pub struct ReplyButton {
 }
 
 impl ReplyButton {
+    #[inline]
     pub fn new(call_back: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             call_back: call_back.into(),
@@ -1509,6 +1555,7 @@ pub struct UrlButton {
 }
 
 impl UrlButton {
+    #[inline]
     pub fn new(url: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             url: url.into(),
@@ -1534,6 +1581,7 @@ pub struct OptionButton {
 }
 
 impl OptionButton {
+    #[inline]
     pub fn new(
         description: impl Into<String>,
         label: impl Into<String>,
@@ -1567,6 +1615,7 @@ impl CallButton {
 
 impl Button {
     /// Create a quick-reply button
+    #[inline]
     pub fn reply(call_back: impl Into<String>, text: impl Into<String>) -> Self {
         Self::Reply(ReplyButton {
             call_back: call_back.into(),
@@ -1575,6 +1624,7 @@ impl Button {
     }
 
     /// Create a URL button
+    #[inline]
     pub fn url(url: impl Into<String>, text: impl Into<String>) -> Self {
         Self::Url(UrlButton {
             url: url.into(),
@@ -1583,6 +1633,7 @@ impl Button {
     }
 
     /// Create a call button
+    #[inline]
     pub fn call(phone_number: impl Into<String>) -> Self {
         Self::Call(CallButton {
             phone_number: phone_number.into(),
@@ -1608,6 +1659,7 @@ pub struct CatalogDisplayOptions {
 }
 
 impl CatalogDisplayOptions {
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -1617,6 +1669,7 @@ impl CatalogDisplayOptions {
         Self::default().thumbnail(product)
     }
 
+    #[inline]
     pub fn thumbnail<'a>(mut self, product: impl ToValue<'a, ProductRef>) -> Self {
         self.thumbnail = Some(product.to_value().into_owned());
         self
@@ -1672,6 +1725,7 @@ pub struct ProductList {
 
 impl ProductList {
     /// Creates a new `ProductList` with a multiple sections.
+    #[inline]
     pub fn new_sections<'c, C, I>(sections: I, catalog: C) -> Self
     where
         I: IntoIterator<Item = Section<ProductRef>>,
@@ -1684,6 +1738,7 @@ impl ProductList {
     }
 
     /// Creates a new `ProductList` with a single initial section.
+    #[inline]
     pub fn new_section<'c, C>(section: Section<ProductRef>, catalog: C) -> Self
     where
         C: ToValue<'c, CatalogRef>, // ToValue has more impls than Into
@@ -1697,6 +1752,7 @@ impl ProductList {
     /// Adds a section of products to the `ProductList`.
     ///
     /// Call this method multiple times to add all the desired categories or groupings
+    #[inline]
     pub fn add_section(mut self, section: Section<ProductRef>) -> Self {
         self.sections.push(section);
         self
@@ -1767,6 +1823,7 @@ pub struct OptionList {
 
 impl OptionList {
     /// Creates a new `OptionList ` with a multiple sections.
+    #[inline]
     pub fn new_sections<I>(sections: I, label: impl Into<String>) -> Self
     where
         I: IntoIterator<Item = Section<OptionButton>>,
@@ -1778,6 +1835,7 @@ impl OptionList {
     }
 
     /// Creates a new `OptionList` with a single initial section.
+    #[inline]
     pub fn new_section(section: Section<OptionButton>, label: impl Into<String>) -> Self {
         Self {
             sections: vec![section],
@@ -1789,12 +1847,14 @@ impl OptionList {
     ///
     /// Call this method multiple times to add all the desired categories or groupings
     /// of options.
+    #[inline]
     pub fn add_section(mut self, section: Section<OptionButton>) -> Self {
         self.sections.push(section);
         self
     }
 }
 
+serde_section! {
 /// A section within an `OptionList` or `ProductList`.
 ///
 /// This struct allows grouping related items (either `OptionButton`s for lists or
@@ -1846,6 +1906,7 @@ pub struct Section<Item> {
     /// A vector of the items belonging to this section.
     pub items: Vec<Item>,
 }
+}
 
 impl<Item> Section<Item> {
     /// Creates a new `Section`.
@@ -1892,6 +1953,7 @@ impl<Item> Section<Item> {
     ///     ],
     /// );
     /// ```
+    #[inline]
     pub fn new<I, T>(title: impl Into<String>, items: I) -> Self
     where
         I: IntoIterator<Item = T>,
@@ -1978,8 +2040,9 @@ pub struct OrderProduct {
 ///     }
 /// ]
 /// ```
-#[derive(PartialEq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Clone, Debug)]
 #[non_exhaustive]
+#[serde(transparent)]
 pub struct ErrorContent {
     pub errors: Vec<MetaError>,
 }
@@ -2017,6 +2080,7 @@ impl MessageRef {
     /// let msg_ref = MessageRef::from_message_id("wamid.ABCDEFG");
     /// assert_eq!(msg_ref.message_id(), "wamid.ABCDEFG");
     /// ```
+    #[inline]
     pub fn from_message_id(id: impl Into<String>) -> Self {
         MessageRef {
             message_id: id.into(),
@@ -2026,16 +2090,19 @@ impl MessageRef {
     }
 
     /// Gets the ID of the referenced message.
+    #[inline]
     pub fn message_id(&self) -> &str {
         &self.message_id
     }
 
     /// Gets the optional sender's identity of the referenced message.
+    #[inline]
     pub fn sender(&self) -> Option<&IdentityRef> {
         self.sender.as_ref()
     }
 
     /// Gets the optional recipient's identity of the referenced message.
+    #[inline]
     pub fn recipient(&self) -> Option<&IdentityRef> {
         self.recipient.as_ref()
     }
@@ -2050,12 +2117,14 @@ impl<T: Into<String>> From<T> for MessageRef {
 /// Just a convenience trait for all MessageRef
 pub trait MessageRefExt<'a>: ToValue<'a, MessageRef> + Sized {
     /// Make this outgoing draft a reply to this message
+    #[inline]
     fn swipe_reply(self, draft: impl IntoDraft) -> Draft {
         let draft = draft.into_draft();
         draft.reply_to(self)
     }
 
     /// React to this message
+    #[inline]
     fn react_to(self, emoji: char) -> Reaction {
         Reaction::new(emoji, self)
     }
@@ -2116,6 +2185,7 @@ impl Message {
     /// A [`MessageRef`] instance derived from this message.
     ///
     /// [`MessageRef`]: crate::message::MessageRef
+    #[inline]
     pub fn as_ref(&self) -> MessageRef {
         MessageRef {
             message_id: self.id.clone(),
@@ -2125,6 +2195,7 @@ impl Message {
     }
 
     /// Creates a lightweight reference to this message [`MessageRef`] without metadata.
+    #[inline]
     pub fn as_ref_no_metadata(&self) -> MessageRef {
         MessageRef {
             message_id: self.id.clone(),
@@ -2146,6 +2217,7 @@ impl Message {
     ///
     /// [`Client`]: crate::client::Client
     /// [`DownloadMedia`]: crate::message::DownloadMedia
+    #[inline]
     pub fn download_media<'dst, Dst>(
         &self,
         dst: &'dst mut Dst,
@@ -2186,6 +2258,7 @@ impl Context {
     ///
     /// # Returns
     /// `Some(&MessageRef)` if this message is a reply, otherwise `None`.
+    #[inline]
     pub fn replied_to(&self) -> Option<&MessageRef> {
         self.replied_to.as_ref()
     }
@@ -2194,6 +2267,7 @@ impl Context {
     ///
     /// # Returns
     /// `Some(&ProductRef)` if a product is referred, otherwise `None`.
+    #[inline]
     pub fn reffered_product(&self) -> Option<&ProductRef> {
         self.reffered_product.as_ref()
     }
@@ -2202,6 +2276,7 @@ impl Context {
     ///
     /// # Returns
     /// `Some(true)` if forwarded, `Some(false)` if not forwarded, `None` if information is unavailable.
+    #[inline]
     pub fn is_forwarded(&self) -> Option<bool> {
         self.forwarded
     }
@@ -2210,6 +2285,7 @@ impl Context {
     ///
     /// # Returns
     /// `Some(true)` if frequently forwarded, `Some(false)` if not, `None` if information is unavailable.
+    #[inline]
     pub fn is_frequently_forwarded(&self) -> Option<bool> {
         self.frequently_forwarded
     }
@@ -2270,7 +2346,8 @@ pub struct Draft {
 impl Draft {
     /// Creates a new, empty message draft.
     ///
-    /// By default, the content is `Text` with an empty body.   
+    /// By default, the content is `Text` with an empty body.
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -2291,6 +2368,7 @@ impl Draft {
     /// let draft = Draft::text("Hello WhatsApp!");
     /// assert!(matches!(draft.content, Content::Text(_)));
     /// ```
+    #[inline]
     pub fn text(text: impl Into<Text>) -> Self {
         Self {
             content: Content::Text(text.into()),
@@ -2317,6 +2395,7 @@ impl Draft {
     /// # }
     /// ```
     /// [`Media`]: crate::message::Media
+    #[inline]
     pub fn media(media: impl Into<Media>) -> Self {
         Self {
             content: Content::Media(media.into()),
@@ -2350,6 +2429,7 @@ impl Draft {
     /// ));
     /// ```
     /// [`InteractiveMessage`]: crate::message::InteractiveMessage
+    #[inline]
     pub fn interactive(interactive_message: InteractiveMessage) -> Self {
         Self {
             content: Content::Interactive(interactive_message.into()),
@@ -2361,6 +2441,7 @@ impl Draft {
     ///
     /// # Arguments
     /// * `message` - Message to reply to
+    #[inline]
     pub fn reply_to<'t, T>(mut self, message: T) -> Self
     where
         T: ToValue<'t, MessageRef>,
@@ -2394,6 +2475,7 @@ impl Draft {
     /// # Ok(())
     /// # }
     /// ```
+    #[inline]
     pub fn with_caption(mut self, caption: impl Into<Text>) -> Self {
         if let Content::Media(mut media) = self.content {
             media = media.caption(caption);
@@ -2421,6 +2503,7 @@ impl Draft {
     ///     .with_biz_opaque_callback_data("order_id_789_customer_123");
     /// assert_eq!(draft.biz_opaque_callback_data.unwrap(), "order_id_789_customer_123");
     /// ```
+    #[inline]
     pub fn with_biz_opaque_callback_data(mut self, data: impl Into<String>) -> Self {
         self.biz_opaque_callback_data = Some(data.into());
         self
@@ -2465,6 +2548,7 @@ impl Draft {
     /// [`SendMessage`]: crate::client::SendMessage
     /// [`Client::message()`]: crate::client::Client::message
     /// [`IdentityRef`]: crate::IdentityRef
+    #[inline]
     pub fn send<'i, S, R>(self, sender: S, recipient: R, client: &Client) -> SendMessage<'i>
     where
         S: ToValue<'i, IdentityRef>,
@@ -2500,36 +2584,43 @@ pub struct MessageCreate {
 
 impl MessageCreate {
     /// If message is in transit within WhatsApp systems
+    #[inline]
     pub fn is_accepted(&self) -> bool {
         matches!(self.message_status, Some(MessageStatus::Accepted))
     }
 
     /// If message is delivered to device
+    #[inline]
     pub fn is_delivered(&self) -> bool {
         matches!(self.message_status, Some(MessageStatus::Delivered))
     }
 
     /// If message is read by recipient
+    #[inline]
     pub fn is_read(&self) -> bool {
         matches!(self.message_status, Some(MessageStatus::Read))
     }
 
     /// If message failed to send
+    #[inline]
     pub fn failed(&self) -> bool {
         matches!(self.message_status, Some(MessageStatus::Failed))
     }
 
     /// If message is sent to WhatsApp
+    #[inline]
     pub fn is_sent(&self) -> bool {
         matches!(self.message_status, Some(MessageStatus::Sent))
     }
 
     /// If catalog item in message is unavailable
+    #[inline]
     pub fn is_warning(&self) -> bool {
         matches!(self.message_status, Some(MessageStatus::Warning))
     }
 
     /// If message was deleted by sender
+    #[inline]
     pub fn is_deleted(&self) -> bool {
         matches!(self.message_status, Some(MessageStatus::Deleted))
     }
@@ -2571,8 +2662,16 @@ enum_traits! {
     CatalogDisplayOptions => CatalogDisplay,
     OptionList => OptionList,
     ProductRef => ProductDisplay,
-    ProductList => ProductList,
-    Keyboard => Keyboard
+    ProductList => ProductList
+    // Flow => Flow
+    // Keyboard => Keyboard
+}
+
+impl<I: Into<Keyboard>> From<I> for InteractiveAction {
+    #[inline]
+    fn from(value: I) -> Self {
+        InteractiveAction::Keyboard(value.into())
+    }
 }
 
 enum_traits! {
@@ -2786,6 +2885,54 @@ impl IntoDraft for InteractiveMessage {
             content: Content::Interactive(InteractiveContent::Message(self)),
             ..Default::default()
         }
+    }
+}
+
+// Let's make it easier to create interactive action using mental model
+// And knowing action and body are required
+//
+// We use full name for diagnostics
+// Header => Body => Action => Footer.
+impl<IHeader, IBody, IAction, IFooter> IntoDraft for (IHeader, IBody, IAction, IFooter)
+where
+    IHeader: Into<InteractiveHeader> + Send,
+    IBody: Into<Text> + Send,
+    IAction: Into<InteractiveAction> + Send,
+    IFooter: Into<Text> + Send,
+{
+    #[inline]
+    fn into_draft(self) -> Draft {
+        let interactive = InteractiveMessage::new(self.2, self.1)
+            .header(self.0)
+            .footer(self.3);
+        interactive.into_draft()
+    }
+}
+
+// Body => Action => Footer.
+impl<IBody, IAction, IFooter> IntoDraft for (IBody, IAction, IFooter)
+where
+    IBody: Into<Text> + Send,
+    IAction: Into<InteractiveAction> + Send,
+    IFooter: Into<Text> + Send,
+{
+    #[inline]
+    fn into_draft(self) -> Draft {
+        let interactive = InteractiveMessage::new(self.1, self.0).footer(self.2);
+        interactive.into_draft()
+    }
+}
+
+// Body => Action.. the way it's displayed
+impl<IBody, IAction> IntoDraft for (IBody, IAction)
+where
+    IBody: Into<Text> + Send,
+    IAction: Into<InteractiveAction> + Send,
+{
+    #[inline]
+    fn into_draft(self) -> Draft {
+        let interactive = InteractiveMessage::new(self.1, self.0);
+        interactive.into_draft()
     }
 }
 
