@@ -1695,6 +1695,7 @@ impl BatchResponse {
             }
             // A `null` was present in the response array.
             Some(None) => Err(ResponseProcessingError::new(
+                #[cfg(debug_assertions)]                                                           
                 endpoint,
                 ResponseProcessingErrorKind::NullNotNullable,
             )),
@@ -2151,7 +2152,7 @@ impl ResponseProcessingError {
         #[cfg(debug_assertions)] endpoint: Cow<'static, str>,
         kind: ResponseProcessingErrorKind,
     ) -> Self {
-        Self { endpoint, kind }
+        Self { #[cfg(debug_assertions)] endpoint, kind }
     }
 }
 
