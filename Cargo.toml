@@ -1,6 +1,6 @@
 [package]
 name = "whatsapp-business-rs"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 authors = ["Victor <victorayo206@example.com>"]
 description = "Rust SDK for the WhatsApp Business API — bulk messaging, batching, and multi-tenant support."
@@ -12,13 +12,13 @@ keywords = ["whatsapp", "batch", "sdk", "messaging", "multi-tenant"]
 categories = ["api-bindings", "web-programming::http-client", "network-programming", "asynchronous"]
 homepage = "https://github.com/veecore/whatsapp-business-rs"
 build = "build.rs"
-exclude = [".github", "assets", "examples", "benches", "tests"]
+exclude = [".github", "assets", "benches", "tests", "examples"]
 
 [dependencies]
 reqwest = { version = "0.12", features = ["json", "multipart"] }
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["raw_value"] }
+serde_json = { version = "1.0" }
 thiserror = "2.0.12"
 async-stream = "0.3.6"
 futures = "0.3.31"

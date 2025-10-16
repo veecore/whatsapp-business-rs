@@ -1472,6 +1472,13 @@ impl Keyboard {
             buttons: buttons.into_iter().map(Into::into).collect(),
         }
     }
+
+    #[inline]
+    fn empty() -> Self {
+        Self {
+            buttons: Vec::new(),
+        }
+    }
 }
 
 impl<I, B> From<I> for Keyboard
@@ -2109,6 +2116,7 @@ impl MessageRef {
 }
 
 impl<T: Into<String>> From<T> for MessageRef {
+    #[inline]
     fn from(value: T) -> Self {
         Self::from_message_id(value)
     }
@@ -2509,6 +2517,139 @@ impl Draft {
         self
     }
 
+    /// Sets the body of the message.
+    ///
+    /// If the current message is not an interactive type, it will be
+    /// automatically converted into one, using existing text or media
+    /// as the body or header, respectively.
+    #[inline]
+    pub fn body(mut self, body: impl Into<Text>) -> Self {
+        self.promote_to_interactive_mut().body = body.into();
+        self
+    }
+
+    /// Adds a header to the message.
+    ///
+    /// If the current message is not an interactive type, it will be
+    /// automatically converted.
+    #[inline]
+    pub fn header(mut self, header: impl Into<InteractiveHeader>) -> Self {
+        self.promote_to_interactive_mut().header = Some(header.into());
+        self
+    }
+
+    /// Adds a footer to the message.
+    ///
+    /// If the current message is not an interactive type, it will be
+    /// automatically converted.
+    #[inline]
+    pub fn footer(mut self, footer: impl Into<Text>) -> Self {
+        self.promote_to_interactive_mut().footer = Some(footer.into());
+        self
+    }
+
+    /// Adds a reply button to the message.
+    ///
+    /// This will convert the message to an interactive message with a `Keyboard`
+    /// action if it isn't one already. If the existing action is not a `Keyboard`,
+    /// it will be **overwritten**.
+    pub fn add_reply_button(
+        mut self,
+        call_back: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        let interactive = self.promote_to_interactive_mut();
+        let button = Button::reply(call_back, label);
+
+        match &mut interactive.action {
+            InteractiveAction::Keyboard(keyboard) => {
+                keyboard.buttons.push(button);
+            }
+            _ => {
+                // Opinionated: Overwrite a non-keyboard action if a button is added.
+                interactive.action = InteractiveAction::Keyboard(Keyboard {
+                    buttons: vec![button],
+                });
+            }
+        }
+        self
+    }
+
+    /// Adds a URL button to the message.
+    ///
+    /// Note: A message can only contain a maximum of one URL button and two reply buttons.
+    /// This method behaves identically to `add_reply_button`.
+    pub fn add_url_button(mut self, url: impl Into<String>, label: impl Into<String>) -> Self {
+        let interactive = self.promote_to_interactive_mut();
+        let button = Button::url(url, label);
+
+        match &mut interactive.action {
+            InteractiveAction::Keyboard(keyboard) => {
+                keyboard.buttons.push(button);
+            }
+            _ => {
+                interactive.action = InteractiveAction::Keyboard(Keyboard {
+                    buttons: vec![button],
+                });
+            }
+        }
+        self
+    }
+
+    /// Sets the message action to a list with the given button label.
+    ///
+    /// This will overwrite any existing interactive action (like a keyboard).
+    /// Chain this with `.add_list_option()` to populate the list.
+    pub fn list(mut self, label: impl Into<String>) -> Self {
+        let interactive = self.promote_to_interactive_mut();
+        interactive.action = InteractiveAction::OptionList(OptionList {
+            label: label.into(),
+            sections: vec![],
+        });
+        self
+    }
+
+    /// Adds a new section to a list message.
+    ///
+    /// This allows for creating structured lists with multiple, titled sections.
+    /// Subsequent calls to `.add_list_option()` will add items to this new section.
+    ///
+    /// If the message is not an `OptionList`, this is a no-op.
+    pub fn add_list_section(mut self, title: impl Into<String>) -> Self {
+        let interactive = self.promote_to_interactive_mut();
+        if let InteractiveAction::OptionList(list) = &mut interactive.action {
+            list.sections
+                .push(Section::new(title, Vec::<OptionButton>::new()));
+        }
+        self
+    }
+
+    /// Adds an option to a list message.
+    ///
+    /// If the message is not a list, this is a no-op. If the list has no
+    /// sections, a default one titled "Options" will be created automatically.
+    pub fn add_list_option(
+        mut self,
+        call_back: impl Into<String>,
+        label: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        let interactive = self.promote_to_interactive_mut();
+        if let InteractiveAction::OptionList(list) = &mut interactive.action {
+            if list.sections.is_empty() {
+                // Opinionated: create a default section if user adds an option to a new list.
+                list.sections
+                    .push(Section::new("Options", Vec::<OptionButton>::new()));
+            }
+            // Add the option to the last section.
+            if let Some(last_section) = list.sections.last_mut() {
+                let option_button = OptionButton::new(description, label, call_back);
+                last_section.items.push(option_button);
+            }
+        }
+        self
+    }
+
     /// Prepares the draft message to be sent to a specific recipient.
     ///
     /// This method initiates the sending process, returning a [`SendMessage`] builder.
@@ -2555,6 +2696,43 @@ impl Draft {
         R: ToValue<'i, IdentityRef>,
     {
         client.message(sender).send(recipient, self)
+    }
+
+    /// (Internal) Promotes the draft's content to an `Interactive` variant if it isn't already.
+    ///
+    /// This is the core of the ergonomic builder. It handles the "mental conversion"
+    /// by taking existing Text or Media content and placing it appropriately
+    /// within a new `InteractiveMessage` structure.
+    fn promote_to_interactive_mut(&mut self) -> &mut InteractiveMessage {
+        let old_content = std::mem::take(&mut self.content);
+
+        let new_interactive = match old_content {
+            Content::Interactive(InteractiveContent::Message(interactive)) => interactive,
+            Content::Interactive(InteractiveContent::Click(button)) => {
+                InteractiveMessage::new(Keyboard::new([button]), "")
+            }
+            Content::Text(text) => {
+                // Convert a text message into an interactive message's body.
+                // Default to a Keyboard action, ready for buttons.
+                InteractiveMessage::new(Keyboard::empty(), text)
+            }
+            Content::Media(media) => {
+                // Convert a media message into an interactive message's header.
+                // The body will be empty and must be set via the `.body()` method.
+                InteractiveMessage::new(Keyboard::empty(), "").header(media)
+            }
+            // For any other type, start with a fresh interactive message.
+            _ => InteractiveMessage::new(Keyboard::empty(), ""),
+        };
+
+        self.content = Content::Interactive(new_interactive.into());
+
+        // This unwrap is safe because we just guaranteed the variant is Interactive.
+        if let Content::Interactive(InteractiveContent::Message(interactive)) = &mut self.content {
+            interactive
+        } else {
+            unreachable!();
+        }
     }
 }
 

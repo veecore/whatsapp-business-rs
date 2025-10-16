@@ -185,28 +185,23 @@ async fn send_location_example() -> Result<(), Box<dyn std::error::Error>> {
 
 -----
 
-### 🔹 Send an Interactive Message (Call-to-Action Button)
+### 🔹 Send an Interactive Message (Buttons)
 
 ```rust
-use whatsapp_business_rs::message::{InteractiveMessage, UrlButton};
+use whatsapp_business_rs::message::Draft;
 use whatsapp_business_rs::Client;
 
 async fn send_cta_example() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new("YOUR_ACCESS_TOKEN").await?;
 
-    let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
-    let recipient_phone_number = "+16012345678";
+    // Start with simple text...
+    let draft = Draft::text("Would you like to continue?")
+        // ...then seamlessly add buttons.
+        .add_reply_button("yes_callback", "Yes")
+        .add_reply_button("no_callback", "No")
+        .footer("Please select an option.");
 
-    // Create a URL button
-    let button = UrlButton::new("https://example.com/purchase", "2 for price of 1");
-
-    // Create an interactive message with the button and a body text
-    let interactive_message = InteractiveMessage::new(
-        button,
-        "One-time offer for this shiny product. Hurry-up!"
-    );
-
-    client.message(sender_phone_id).send(recipient_phone_number, interactive_message).await?;
+    client.message("YOUR_BUSINESS_PHONE_NUMBER_ID").send("+16012345678", draft).await?;
     println!("Call-to-Action message sent!");
     Ok(())
 }
@@ -226,25 +221,16 @@ async fn send_option_list_example() -> Result<(), Box<dyn std::error::Error>> {
     let sender_phone_id = "YOUR_BUSINESS_PHONE_NUMBER_ID";
     let recipient_phone_number = "+16012345678";
 
-    // Create sections with options
-    let section = Section::new(
-        "Choose an option regarding your last order",
-        [
-            OptionButton::new("Cancels deliver", "Cancel", "cancel-delivery"),
-            OptionButton::new("Proceed with order", "Order", "proceed-with-order"),
-        ],
-    );
+    let draft = Draft::new()
+        .body("We have several delicious options for you to choose from. Please make a selection.")
+        .header("Main Menu 🍕")
+        // Set the action to a list, defining the button that opens it.
+        .list("View Options") 
+        // Add options. A default section is created automatically.
+        .add_list_option("buy_pepperoni", "Pepperoni", "Classic pepperoni pizza.")
+        .add_list_option("buy_margherita", "Margherita", "Simple and delicious tomato and cheese.");
 
-    // Create an option list with the section and a global label
-    let options = OptionList::new_section(section, "Delivery Options");
-
-    // Create an interactive message with the option list, body, and footer
-    let interactive_message = InteractiveMessage::new(
-        options,
-        "Sorry your delivery is delayed... would you like to cancel the order?",
-    ).footer("Only 70% in refund");
-
-    client.message(sender_phone_id).send(recipient_phone_number, interactive_message).await?;
+    client.message(sender_phone_id).send(recipient_phone_number, draft).await?;
     println!("Option list message sent!");
     Ok(())
 }
