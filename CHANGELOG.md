@@ -1,4 +1,20 @@
 # Changelog
+
+
+# [0.3.1] - 2025-10-16
+
+This release focuses on significantly improving the ergonomics of building interactive messages. 🎉
+
+We've supercharged the `Draft` struct with a fluent builder pattern, making it simpler and more intuitive to construct everything from simple button replies to complex, multi-section lists.
+
+## ✨ Key Features:
+- **Fluent Interactive Builders**: Easily chain methods like `.body()`, `.header()`, `.footer()`, and `.add_reply_button()` to build your message step-by-step.
+- **Structured Lists**: A new `add_list_section("Section Title")` method gives you full control over organizing list options into distinct, named sections.
+
+This update makes the API more expressive and less error-prone, helping you build powerful interactive experiences with ease.
+
+----------
+
 ## [0.3.0] - 2025-10-14
 
 This is a significant release focused on major internal refactoring to improve performance and type safety, while also introducing powerful new features and key API improvements.
