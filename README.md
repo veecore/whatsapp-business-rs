@@ -14,9 +14,9 @@ Send messages, handle webhooks, manage catalogs, or **batch thousands of API cal
 
 ## 🎮 See it in Action\!
 
-Check out our **[Bulls & Cows Game Bot example](https://github.com/veecore/whatsapp-business-rs/examples/bulls-and-cows)**, built entirely with this crate. It showcases an interactive, stateful bot using a state machine pattern.
+Check out our **[Bulls & Cows Game Bot example](https://github.com/veecore/whatsapp-business-rs/examples/bulls-n-cows)**, built entirely with this crate. It showcases an interactive, stateful bot using a state machine pattern.
 
-![Game screenshot](https://raw.githubusercontent.com/veecore/whatsapp-business-rs/main/assets/bulls-and-cows.png)
+![Game screenshot](https://raw.githubusercontent.com/veecore/whatsapp-business-rs/main/assets/bulls-n-cows.png)
 
 -----
 
