@@ -220,7 +220,7 @@ impl<'i> AppManager<'i> {
             client_id: &self.app.id,
             client_secret: app_secret,
             grant_type: GrantType::FbExchangeToken,
-            fb_exchange_token: &token,
+            fb_exchange_token: token,
             ..Default::default()
         };
 

@@ -128,9 +128,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-\<details\>
-\<summary\>\<strong\>More Examples (Batching, Media, Interactive & Catalogs)\</strong\>\</summary\>
-
 ### 🚀 Send Bulk Messages with Batch
 
 Batching reduces round-trips and lets you chain dependent requests.
@@ -276,8 +273,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
-
-\</details\>
 
 -----
 
