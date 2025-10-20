@@ -31,43 +31,43 @@ macro_rules! serde_section {
         }
     };
     ($($item_name:ident => $ty:path),*) => {
-    paste::paste!{
-        $(
-            /// A helper struct for serializing/deserializing `Section<` a_ty `>`.
-            #[derive(Serialize, Deserialize)]
-            struct [<$ty Section>] {
-                title: String,
-                $item_name: Vec<$ty>
-            }
-
-            impl serde::Serialize for $crate::message::Section<$ty> {
-                #[inline]
-                fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-                    where
-                        S: serde::Serializer {
-                    // SAFETY: These are literally thesame structs under different names so they'll always
-                    // have thesame layout.
-                    //
-                    // Trying to avoid this will likely involve heavy unnecessary cloning since we're behind
-                    // a reference.
-                    let helper: &[<$ty Section>] = unsafe { std::mem::transmute(self) };
-                    helper.serialize(serializer)
+        paste::paste!{
+            $(
+                /// A helper struct for serializing/deserializing `Section<` a_ty `>`.
+                #[derive(Serialize, Deserialize)]
+                struct [<$ty Section>] {
+                    title: String,
+                    $item_name: Vec<$ty>
                 }
-            }
 
-            impl<'de> serde::Deserialize<'de> for $crate::message::Section<$ty> {
-                #[inline]
-                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                    where
-                        D: serde::Deserializer<'de> {
-                    let helper = [<$ty Section>]::deserialize(deserializer)?;
-                    // SAFETY: These are literally thesame structs under different names so they'll always
-                    // have thesame layout.
-                    Ok(unsafe { std::mem::transmute::<[<$ty Section>], $crate::message::Section<$ty>>(helper) })
+                impl serde::Serialize for $crate::message::Section<$ty> {
+                    #[inline]
+                    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                        where
+                            S: serde::Serializer {
+                        // SAFETY: These are literally thesame structs under different names so they'll always
+                        // have thesame layout.
+                        //
+                        // Trying to avoid this will likely involve heavy unnecessary cloning since we're behind
+                        // a reference.
+                        let helper: &[<$ty Section>] = unsafe { std::mem::transmute(self) };
+                        helper.serialize(serializer)
+                    }
                 }
-            }
-        )*
-    }
+
+                impl<'de> serde::Deserialize<'de> for $crate::message::Section<$ty> {
+                    #[inline]
+                    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                        where
+                            D: serde::Deserializer<'de> {
+                        let helper = [<$ty Section>]::deserialize(deserializer)?;
+                        // SAFETY: These are literally thesame structs under different names so they'll always
+                        // have thesame layout.
+                        Ok(unsafe { std::mem::transmute::<[<$ty Section>], $crate::message::Section<$ty>>(helper) })
+                    }
+                }
+            )*
+        }
     }
 }
 
@@ -96,6 +96,7 @@ macro_rules! requests_batch_include {
         // We need a name like this to avoid collision
         type Include<SomeR> = (Self, SomeR);
 
+        #[inline]
         fn include<SomeR>(self, r: SomeR) -> Self::Include<SomeR> {
             (self, r)
         }
@@ -111,83 +112,83 @@ macro_rules! requests_batch_include {
 // that NullableUnit<T>... so we use macro instead
 #[cfg(feature = "batch")]
 macro_rules! NullableUnit {
-        ($T:ident <$($life:lifetime,)? $([$g:ty: $($b:tt)*]),*>) => {
-            paste::paste!{
-                impl<$($life,)? $($g: $($b)*),*> $crate::batch::Nullable for $T<$($life,)? $($g),*> {
-                    type Nullable = [<Nullable $T>] <$($life,)? $($g),*>;
+    ($T:ident <$($life:lifetime,)? $([$g:ty: $($b:tt)*]),*>) => {
+        paste::paste!{
+            impl<$($life,)? $($g: $($b)*),*> $crate::batch::Nullable for $T<$($life,)? $($g),*> {
+                type Nullable = [<Nullable $T>] <$($life,)? $($g),*>;
 
-                    #[inline]
-                    fn nullable(self) -> Self::Nullable {
-                        Self::Nullable {
-                            inner: self
-                        }
+                #[inline]
+                fn nullable(self) -> Self::Nullable {
+                    Self::Nullable {
+                        inner: self
                     }
                 }
+            }
 
-                impl_idempotent_nullable! {[<Nullable $T>] <$($life,)? $($g),*>}
+            impl_idempotent_nullable! {[<Nullable $T>] <$($life,)? $($g),*>}
 
-                pub struct [<Nullable $T>] <$($life,)? $($g),*> {
-                    inner: $T <$($life,)? $($g),*>
+            pub struct [<Nullable $T>] <$($life,)? $($g),*> {
+                inner: $T <$($life,)? $($g),*>
+            }
+
+            impl<$($life,)? $($g: $($b)*),*> $crate::batch::Requests for [<Nullable $T>] <$($life,)? $($g),*> {
+                type BatchHandler = [<Nullable $T Handler>] <$($life,)? $($g),*>;
+
+                type ResponseReference = <$T <$($life,)? $($g),*> as $crate::batch::Requests>::ResponseReference;
+
+                #[inline]
+                fn into_batch_ref(
+                    self,
+                    batch_serializer: &mut $crate::batch::BatchSerializer,
+                ) -> Result<(Self::BatchHandler, Self::ResponseReference), $crate::batch::FormatError> {
+                    let (h, r) = self.inner.into_batch_ref(batch_serializer)?;
+                    Ok(([<Nullable $T Handler>]{inner: h}, r))
                 }
 
-                impl<$($life,)? $($g: $($b)*),*> $crate::batch::Requests for [<Nullable $T>] <$($life,)? $($g),*> {
-                    type BatchHandler = [<Nullable $T Handler>] <$($life,)? $($g),*>;
-
-                    type ResponseReference = <$T <$($life,)? $($g),*> as $crate::batch::Requests>::ResponseReference;
-
-                    #[inline]
-                    fn into_batch_ref(
-                        self,
-                        batch_serializer: &mut $crate::batch::BatchSerializer,
-                    ) -> Result<(Self::BatchHandler, Self::ResponseReference), $crate::batch::FormatError> {
-                        let (h, r) = self.inner.into_batch_ref(batch_serializer)?;
-                        Ok(([<Nullable $T Handler>]{inner: h}, r))
-                    }
-
-                    #[inline]
-                    fn into_batch(self, batch_serializer: &mut $crate::batch::BatchSerializer) -> Result<Self::BatchHandler, $crate::batch::FormatError>
-                    where
-                        Self: Sized,
-                    {
-                        let h = self.inner.into_batch(batch_serializer)?;
-                        Ok([<Nullable $T Handler>]{inner: h})
-                    }
-
-                    #[inline]
-                    fn size_hint(&self) -> (usize, Option<usize>) {
-                        // (1, Some(1)) SendMessage breaks this assumption
-                        self.inner.size_hint()
-                    }
-
-                    requests_batch_include! {}
+                #[inline]
+                fn into_batch(self, batch_serializer: &mut $crate::batch::BatchSerializer) -> Result<Self::BatchHandler, $crate::batch::FormatError>
+                where
+                    Self: Sized,
+                {
+                    let h = self.inner.into_batch(batch_serializer)?;
+                    Ok([<Nullable $T Handler>]{inner: h})
                 }
 
-                pub struct [<Nullable $T Handler>] <$($life,)? $($g: $($b)*),*> {
-                    inner: <$T <$($life,)? $($g),*> as $crate::batch::Requests>::BatchHandler
+                #[inline]
+                fn size_hint(&self) -> (usize, Option<usize>) {
+                    // (1, Some(1)) SendMessage breaks this assumption
+                    self.inner.size_hint()
                 }
 
-                impl<$($life,)? $($g: $($b)*),*> $crate::batch::Handler for [<Nullable $T Handler>] <$($life,)? $($g),*> {
-                    type Responses =
-                        Option<<<$T <$($life,)? $($g),*> as $crate::batch::Requests>::BatchHandler as $crate::batch::Handler>::Responses>;
+                requests_batch_include! {}
+            }
 
-                    #[inline]
-                    fn from_batch(
-                        self,
-                        response: &mut $crate::batch::BatchResponse,
-                    ) -> Result<Self::Responses, $crate::batch::ResponseProcessingError> {
-                        match self.inner.from_batch(response) {
-                            Ok(val) => Ok(Some(val)),
-                            Err($crate::batch::ResponseProcessingError {
-                                kind: $crate::batch::ResponseProcessingErrorKind::NullNotNullable,
-                                ..
-                            }) => Ok(None),
-                            Err(err) => Err(err), // real error, propagate
-                        }
+            pub struct [<Nullable $T Handler>] <$($life,)? $($g: $($b)*),*> {
+                inner: <$T <$($life,)? $($g),*> as $crate::batch::Requests>::BatchHandler
+            }
+
+            impl<$($life,)? $($g: $($b)*),*> $crate::batch::Handler for [<Nullable $T Handler>] <$($life,)? $($g),*> {
+                type Responses =
+                    Option<<<$T <$($life,)? $($g),*> as $crate::batch::Requests>::BatchHandler as $crate::batch::Handler>::Responses>;
+
+                #[inline]
+                fn from_batch(
+                    self,
+                    response: &mut $crate::batch::BatchResponse,
+                ) -> Result<Self::Responses, $crate::batch::ResponseProcessingError> {
+                    match self.inner.from_batch(response) {
+                        Ok(val) => Ok(Some(val)),
+                        Err($crate::batch::ResponseProcessingError {
+                            kind: $crate::batch::ResponseProcessingErrorKind::NullNotNullable,
+                            ..
+                        }) => Ok(None),
+                        Err(err) => Err(err), // real error, propagate
                     }
                 }
             }
         }
     }
+}
 
 /// WATCH OUT FOR RENAMED FIELDS
 #[cfg(feature = "batch")]

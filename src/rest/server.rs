@@ -3,7 +3,6 @@ use axum::{
     body::Bytes,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
     routing::post,
 };
 use hmac::{Hmac, Mac};
@@ -12,6 +11,7 @@ use sha2::Sha256;
 use std::{
     borrow::Cow,
     collections::{HashMap, VecDeque},
+    future::{Ready, ready},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -51,12 +51,14 @@ macro_rules! error {
     }}
 }
 
+/// Internal shared state for the webhook logic.
+/// This struct is used by both the high-level server and the low-level service.
 pub(crate) struct InnerServer<H, V, W> {
     #[cfg(feature = "incoming_message_ext")]
-    client: Client,
-    handler: H,
-    app_secret: V,
-    verify_token: W,
+    pub(crate) client: Client,
+    pub(crate) handler: H,
+    pub(crate) app_secret: V,
+    pub(crate) verify_token: W,
 }
 
 impl Server {
@@ -134,11 +136,10 @@ impl Server {
 }
 
 // Verification handler
-#[allow(clippy::owned_cow)]
-async fn handle_verification<V, H>(
-    State(state): State<Arc<InnerServer<H, V, Cow<'static, String>>>>,
+pub(crate) fn handle_verification<V, H>(
+    State(state): State<Arc<InnerServer<H, V, String>>>,
     query: Query<HashMap<String, String>>,
-) -> impl IntoResponse
+) -> Ready<(StatusCode, Cow<'static, str>)>
 where
     V: Send + Sync + 'static,
     H: Handler + 'static,
@@ -151,42 +152,42 @@ where
 
     // Verify the token matches our secret and echo
     if challenge.hub_verify_token == *state.verify_token {
-        (StatusCode::OK, challenge.hub_challenge)
+        ready((StatusCode::OK, challenge.hub_challenge.into()))
     } else {
         error!(state =>
             "Invalid verification token. Expected: '{}', Received: '{}'",
             state.verify_token, challenge.hub_verify_token
         );
-        (
-            StatusCode::FORBIDDEN,
-            "Invalid verification token".to_string(),
-        )
+        ready((StatusCode::FORBIDDEN, "Invalid verification token".into()))
     }
 }
 
-async fn handle_webhook_verify_payload<W, H>(
+pub(crate) fn handle_webhook_verify_payload<W, H>(
     state: State<Arc<InnerServer<H, AppSecret, W>>>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse
+) -> Ready<(StatusCode, Cow<'static, str>)>
 where
     W: Send + Sync + 'static,
     H: Handler + 'static,
 {
     if let Err(e) = verify_signature(&state.app_secret, &headers, &body) {
         error!(state => "Signature verification failed: {e:#?}");
-        return (StatusCode::UNAUTHORIZED, "Signature verification failed");
+        return ready((
+            StatusCode::UNAUTHORIZED,
+            "Signature verification failed".into(),
+        ));
     }
 
-    handle_webhook(state, body).await
+    handle_webhook(state, body)
 }
 
 // Webhook handler
 #[inline]
-async fn handle_webhook<V, W, H>(
+pub(crate) fn handle_webhook<V, W, H>(
     State(state): State<Arc<InnerServer<H, V, W>>>,
     body: Bytes,
-) -> (StatusCode, &'static str)
+) -> Ready<(StatusCode, Cow<'static, str>)>
 where
     V: Send + Sync + 'static,
     W: Send + Sync + 'static,
@@ -196,11 +197,12 @@ where
         Ok(p) => p,
         Err(e) => {
             error!(state => "JSON parsing failed: {:?}", e);
-            return (
+            return ready((
                 StatusCode::BAD_REQUEST,
                 "Invalid JSON payload.\
-         Please ensure the body is valid JSON.",
-            );
+         Please ensure the body is valid JSON."
+                    .into(),
+            ));
         }
     };
 
@@ -214,13 +216,14 @@ where
         &state.client,
     ) {
         error!(state => "Event processing failed: {err:#?}");
-        (
+        ready((
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to process webhook event \
-             due to an internal server error. Check server logs for details.",
-        )
+             due to an internal server error. Check server logs for details."
+                .into(),
+        ))
     } else {
-        (StatusCode::OK, "")
+        ready((StatusCode::OK, "".into()))
     }
 }
 

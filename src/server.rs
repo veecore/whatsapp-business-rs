@@ -3,12 +3,16 @@
 //! Provides a high-level API for receiving and processing WhatsApp events
 //! through webhooks. Handles verification, signature validation, and event routing.
 //!
-//! ## Features
+//! This module provides a high-level `Server` that handles all the networking,
+//! routing, and lifecycle management for you. It's the easiest way to get started.
 //!
-//! - Start a webhook server and automatically verify the webhook with Meta.
-//! - Validate incoming request signatures.
-//! - Route incoming events to handler methods.
-//! - Support for message events, message-status updates, and more.
+//! For a more flexible, low-level integration, see the [`crate::webhook_service`] module.
+//!
+//! # Key Components
+//! - [`ServerBuilder`]: Configure the server's endpoint, route, shutdown signal, and security.
+//! - [`Server`]: The configured server, ready to run.
+//! - [`Server::serve`]: A method that takes your [`Handler`] and returns a `Future`
+//!   which runs the server until it's shut down.
 //!
 //! # Examples
 //!
@@ -115,6 +119,7 @@ use crate::client::{Client, SendMessage, SetRead, SetReplying};
 #[cfg(feature = "incoming_message_ext")]
 use crate::message::Reaction;
 
+// Default Server configuration...
 const DEFAULT_ENDPOINT: &str = "127.0.0.1:3000";
 const DEFAULT_ROUTE_PATH: &str = "/";
 
@@ -272,7 +277,7 @@ impl<H: Handler + 'static> Serve<H> {
         pending: ConfigureWebhook<'static>,
     ) -> Self {
         self.pending_register = Some(pending);
-        self.server.config.verify_token = Some(Cow::Owned(verify_token.into()));
+        self.server.config.verify_token = Some(verify_token.into());
         self
     }
 
@@ -328,7 +333,7 @@ impl<H: Handler + 'static> Serve<H> {
     pub fn register_webhook(mut self, pending: ConfigureWebhook<'static>) -> Self {
         // We extract the token from the request definition itself.
         // No more redundant parameters!
-        let token = pending.request.query.a.verify_token.clone();
+        let token = pending.request.query.a.verify_token.clone().into_owned();
         self.server.config.verify_token = Some(token);
 
         self.pending_register = Some(pending);
@@ -463,13 +468,13 @@ IntoFuture! {
 ///     .build();
 /// # }
 /// ```
+#[must_use]
 pub struct ServerBuilder {
     pub(crate) endpoint: SocketAddr,
     pub(crate) route_path: String,
     pub(crate) shutdown: Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
     pub(crate) app_secret: Option<AppSecret>,
-    #[allow(clippy::owned_cow)]
-    pub(crate) verify_token: Option<Cow<'static, String>>,
+    pub(crate) verify_token: Option<String>,
 }
 
 impl Default for ServerBuilder {
@@ -643,7 +648,7 @@ impl ServerBuilder {
     ///     .verify_token("MY_SECURE_VERIFICATION_TOKEN");
     /// ```
     pub fn verify_token(mut self, verify_token: impl Into<String>) -> Self {
-        self.verify_token = Some(Cow::Owned(verify_token.into()));
+        self.verify_token = Some(verify_token.into());
         self
     }
 

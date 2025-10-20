@@ -542,6 +542,7 @@ impl Client {
 /// let builder = ClientBuilder::new();
 /// ```
 #[derive(Debug)]
+#[must_use]
 pub struct ClientBuilder {
     http: HttpClientBuilder,
     api_version: &'static str,
@@ -1858,6 +1859,22 @@ impl TryFrom<&Auth> for reqwest::header::HeaderValue {
     }
 }
 
+impl TryFrom<TokenAuth> for ParsedAuth {
+    type Error = reqwest::header::InvalidHeaderValue;
+
+    #[inline]
+    fn try_from(value: TokenAuth) -> Result<Self, Self::Error> {
+        let header = format!("Bearer {value}")
+            .try_into()
+            .map(|mut h: HeaderValue| {
+                h.set_sensitive(true);
+                h
+            })?;
+
+        Ok(Self { header })
+    }
+}
+
 impl Display for TokenAuth {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1939,6 +1956,14 @@ where
 }
 
 impl Deref for TokenAuth {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Deref for AppSecret {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {

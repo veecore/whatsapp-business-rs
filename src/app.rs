@@ -210,11 +210,17 @@ impl<'i> AppManager<'i> {
         T: ToValue<'t, TokenAuth>,
         A: ToValue<'s, AppSecret>,
     {
+        self.update_token_str(&token.to_value(), &app_secret.to_value())
+            .await
+    }
+
+    #[inline]
+    async fn update_token_str(&self, token: &str, app_secret: &str) -> Result<Token, Error> {
         let request = AccessTokenRequest {
             client_id: &self.app.id,
-            client_secret: &app_secret.to_value().0,
+            client_secret: app_secret,
             grant_type: GrantType::FbExchangeToken,
-            fb_exchange_token: &token.to_value(),
+            fb_exchange_token: &token,
             ..Default::default()
         };
 

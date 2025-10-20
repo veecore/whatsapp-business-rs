@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0] - 2025-10-20
+
+### Added
+
+-   **Low-Level "Bring Your Own Server" (BYOS) API**: Introduced a new `webhook_service` module designed for users who want to integrate WhatsApp webhook logic into their own server frameworks.
+    -   `whatsapp_business_rs::webhook_service::WebhookServiceBuilder`: A dedicated builder for configuring the low-level service.
+    -   `whatsapp_business_rs::webhook_service::WebhookService`: The core service struct, which is `Clone`, `Send`, `Sync`, and `'static'`. It exposes a single `.handle(http::Request)` method for processing all webhook-related requests.
+    -   This allows for seamless integration with external web frameworks like `axum`, `hyper`, and `warp`.
+    
+----------
+
 ## [0.3.1] - 2025-10-16
 
 ### Added

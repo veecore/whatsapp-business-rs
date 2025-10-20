@@ -371,6 +371,8 @@ pub mod message;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod waba;
+#[cfg(feature = "byos")]
+pub mod webhook_service;
 
 macro_rules! identity {
     // Generate identity functions with documentation
@@ -1223,11 +1225,11 @@ impl<'a> ToValue<'a, Waba> for &'a Business {
     }
 }
 
-// TODO: Reduce
 pub use client::{Auth, Client};
 use client::{JsonObjectPayload, PendingRequest};
 pub use error::Error;
 pub use message::{Draft, Message};
+#[cfg(feature = "server")]
 pub use server::{Handler as WebhookHandler, Server};
 
 use rest::{FieldsTrait, FromResponseOwned, execute_request, macros::view_ref};

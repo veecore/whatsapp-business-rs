@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 #[macro_use]
 pub(crate) mod macros;
 pub(crate) mod client;
+#[cfg(any(feature = "server", feature = "byos"))]
 pub(crate) mod server;
 
 pub(crate) use macros::{AdjacentHelper, BuilderInto};
