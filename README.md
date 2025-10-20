@@ -95,12 +95,8 @@ impl WebhookHandler for EchoHandler {
     async fn handle_message(&self, _ctx: EventContext, msg: IncomingMessage) {
         println!("Received message from: {}", msg.sender.wa_id);
         
-        // Echo the received text message back to the sender
-        if let Some(text) = msg.text_body() {
-            if let Err(e) = msg.reply(format!("You said: {}", text)).await {
-                eprintln!("Failed to send echo message: {}", e);
-            }
-        }
+        // Echo the received message back to the sender
+        msg.reply(msg.clone()).await;   
     }
 }
 
