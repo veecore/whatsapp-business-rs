@@ -14,7 +14,7 @@ use crate::{
     app::WebhookConfig,
     catalog::{MetaProductRef, ProductCreate, ProductRef},
     client::{
-        Auth, Client, DeleteMedia, MessageManager, PendingRequest, UploadMedia,
+        Auth, Client, DeleteMedia, GetMediaInfo, MessageManager, PendingRequest, UploadMedia,
         UploadMediaResponseReference,
     },
     error::{Error, ServiceError, ServiceErrorKind},
@@ -33,7 +33,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::io::AsyncWrite;
 
 #[cfg(feature = "batch")]
-use crate::client::NullableUploadMediaHandler;
+use crate::client::{NullableGetMediaInfoHandler, NullableUploadMediaHandler};
 
 // --- Core Media Operations ---
 
@@ -75,34 +75,6 @@ impl Client {
         DeleteMedia {
             request: self.delete(self.a_node(media_id)),
         }
-    }
-}
-
-SimpleOutput! {
-    GetMediaInfo => MediaInfo
-}
-
-// Batching support for GetMediaInfo
-#[cfg(feature = "batch")]
-#[derive(Clone)]
-pub struct GetMediaInfoResponseReference {
-    reference_id: Cow<'static, str>,
-}
-
-#[cfg(feature = "batch")]
-impl GetMediaInfoResponseReference {
-    fn url(self) -> String {
-        let id = self.reference_id;
-        reference!(id => MediaInfo => [url])
-    }
-}
-
-#[cfg(feature = "batch")]
-impl crate::batch::IntoResponseReference for GetMediaInfo {
-    type ResponseReference = GetMediaInfoResponseReference;
-
-    fn into_response_reference(reference_id: Cow<'static, str>) -> Self::ResponseReference {
-        Self::ResponseReference { reference_id }
     }
 }
 
@@ -659,296 +631,286 @@ impl<'a> MessageStatusRequest<'a> {
 // ---- Batch impls -----
 
 #[cfg(feature = "batch")]
-impl crate::batch::Requests for UploadMedia {
-    type BatchHandler = UploadMediaHandler;
+mod batch {
+    use super::*;
+    use crate::batch::{
+        BatchResponse, BatchSerializer, FormatError, Handler, Nullable, Requests,
+        ResponseProcessingError,
+    };
 
-    type ResponseReference = UploadMediaResponseReference;
+    impl Requests for UploadMedia {
+        type BatchHandler = UploadMediaHandler;
 
-    #[inline]
-    fn into_batch_ref(
-        self,
-        batch_serializer: &mut crate::batch::BatchSerializer,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        #[derive(Serialize)]
-        struct Payload {
-            messaging_product: &'static str,
+        type ResponseReference = UploadMediaResponseReference;
+
+        #[inline]
+        fn into_batch_ref(
+            self,
+            batch_serializer: &mut BatchSerializer,
+        ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
+            #[derive(Serialize)]
+            struct Payload {
+                messaging_product: &'static str,
+            }
+
+            #[cfg(debug_assertions)]
+            let endpoint = self.request.endpoint.clone();
+
+            let mut request = batch_serializer
+                .format_request(self.request)
+                .attach_file(None, self.media)
+                .json_object_body(Payload {
+                    messaging_product: "whatsapp",
+                });
+
+            let name = request.get_name();
+            let reference = reference!(name => MediaUploadResponse => [id]);
+            request.finish()?;
+
+            Ok((
+                UploadMediaHandler {
+                    #[cfg(debug_assertions)]
+                    endpoint: endpoint.into(),
+                },
+                UploadMediaResponseReference(reference),
+            ))
         }
 
+        requests_batch_include! {}
+    }
+
+    #[derive(Debug)]
+    pub struct UploadMediaHandler {
         #[cfg(debug_assertions)]
-        let endpoint = self.request.endpoint.clone();
-
-        let mut request = batch_serializer
-            .format_request(self.request)
-            .attach_file(None, self.media)
-            .json_object_body(Payload {
-                messaging_product: "whatsapp",
-            });
-
-        let name = request.get_name();
-        let reference = reference!(name => MediaUploadResponse => [id]);
-        request.finish()?;
-
-        Ok((
-            UploadMediaHandler {
-                #[cfg(debug_assertions)]
-                endpoint: endpoint.into(),
-            },
-            UploadMediaResponseReference(reference),
-        ))
+        endpoint: Cow<'static, str>,
     }
 
-    requests_batch_include! {}
-}
+    impl Handler for UploadMediaHandler {
+        type Responses = Result<String, Error>;
 
-#[derive(Debug)]
-#[cfg(feature = "batch")]
-pub struct UploadMediaHandler {
-    #[cfg(debug_assertions)]
-    endpoint: Cow<'static, str>,
-}
-
-#[cfg(feature = "batch")]
-impl crate::batch::Handler for UploadMediaHandler {
-    type Responses = Result<String, Error>;
-
-    #[inline]
-    fn from_batch(
-        self,
-        response: &mut crate::batch::BatchResponse,
-    ) -> Result<Self::Responses, crate::batch::ResponseProcessingError> {
-        Ok(response
-            .try_next::<MediaUploadResponse>(
-                #[cfg(debug_assertions)]
-                self.endpoint,
-            )?
-            .map(|r| r.id))
-    }
-}
-
-#[cfg(feature = "batch")]
-impl crate::batch::Requests for MediaPayloadSource {
-    type BatchHandler = Option<NullableUploadMediaHandler>;
-
-    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
-
-    #[inline]
-    fn into_batch_ref(
-        self,
-        f: &mut crate::batch::BatchSerializer,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        match self {
-            Self::FromBytes(upload_media) => {
-                use crate::batch::Nullable as _;
-
-                let (handler, id) = upload_media.nullable().into_batch_ref(f)?;
-                Ok((Some(handler), MediaRef::Id(id.0)))
-            }
-            Self::FromRef(media_ref) => Ok((None, media_ref)),
+        #[inline]
+        fn from_batch(
+            self,
+            response: &mut BatchResponse,
+        ) -> Result<Self::Responses, ResponseProcessingError> {
+            Ok(response
+                .try_next::<MediaUploadResponse>(
+                    #[cfg(debug_assertions)]
+                    self.endpoint,
+                )?
+                .map(|r| r.id))
         }
     }
 
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        if let Self::FromBytes(upload_media) = &self {
-            upload_media.size_hint()
-        } else {
-            (0, Some(0))
+    impl Requests for MediaPayloadSource {
+        type BatchHandler = Option<NullableUploadMediaHandler>;
+
+        type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
+
+        #[inline]
+        fn into_batch_ref(
+            self,
+            f: &mut BatchSerializer,
+        ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
+            match self {
+                Self::FromBytes(upload_media) => {
+                    use Nullable as _;
+
+                    let (handler, id) = upload_media.nullable().into_batch_ref(f)?;
+                    Ok((Some(handler), MediaRef::Id(id.0)))
+                }
+                Self::FromRef(media_ref) => Ok((None, media_ref)),
+            }
+        }
+
+        #[inline]
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            if let Self::FromBytes(upload_media) = &self {
+                upload_media.size_hint()
+            } else {
+                (0, Some(0))
+            }
+        }
+
+        requests_batch_include! {}
+    }
+
+    impl Requests for PendingMediaPayload {
+        type BatchHandler = <MediaPayloadSource as Requests>::BatchHandler;
+
+        type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
+
+        #[inline]
+        fn into_batch_ref(
+            self,
+            f: &mut BatchSerializer,
+        ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
+            let (h, r) = self.source.into_batch_ref(f)?;
+
+            let request = Self::ResponseReference {
+                media: r,
+                caption: self.caption,
+                filename: self.filename,
+            };
+
+            Ok((h, request))
+        }
+
+        #[inline]
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.source.size_hint()
+        }
+
+        requests_batch_include! {}
+    }
+
+    impl StagedInteractiveHeader {
+        fn into_batch_ref(
+            self,
+            batch_serializer: &mut BatchSerializer,
+        ) -> Result<
+            (
+                (NullableUploadMediaHandler, NullableGetMediaInfoHandler),
+                String,
+            ),
+            FormatError,
+        > {
+            // I'm not sure if depending on a request gives the dependent request
+            // the auth. We'd just go from then_nullable into the batch
+
+            use {Nullable as _, Requests as _};
+            let auth = self.upload_media.request.auth.clone();
+
+            let (upload_media_handler, upload_media_ref) = self
+                .upload_media
+                .nullable()
+                .into_batch_ref(batch_serializer)?;
+            let media_id_ref = upload_media_ref.0;
+
+            let mut get_media_info = self.client.get_media_info(&media_id_ref);
+            if let Some(auth) = auth {
+                get_media_info = get_media_info.with_auth(auth)
+            }
+
+            let (get_media_info_handler, media_info_ref) =
+                get_media_info.nullable().into_batch_ref(batch_serializer)?;
+
+            let url_ref = media_info_ref.url();
+
+            Ok(((upload_media_handler, get_media_info_handler), url_ref))
         }
     }
 
-    requests_batch_include! {}
-}
+    impl Requests for PendingInteractiveMediaHeader {
+        type BatchHandler = PendingInteractiveMediaHeaderBatchHandler;
 
-#[cfg(feature = "batch")]
-impl crate::batch::Requests for PendingMediaPayload {
-    type BatchHandler = <MediaPayloadSource as crate::batch::Requests>::BatchHandler;
+        type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
 
-    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
+        fn into_batch_ref(
+            self,
+            batch_serializer: &mut BatchSerializer,
+        ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
+            // Won't work but for completeness
+            let (handler, link) = match self {
+                Self::FromUpload(upload_media) => {
+                    let (handlers, url_ref) = upload_media.into_batch_ref(batch_serializer)?;
 
-    #[inline]
-    fn into_batch_ref(
-        self,
-        f: &mut crate::batch::BatchSerializer,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        let (h, r) = self.source.into_batch_ref(f)?;
+                    (
+                        PendingInteractiveMediaHeaderBatchHandler::FromUpload(handlers),
+                        url_ref,
+                    )
+                }
+                Self::FromId(get_media_info) => {
+                    use Nullable as _;
 
-        let request = Self::ResponseReference {
-            media: r,
-            caption: self.caption,
-            filename: self.filename,
-        };
+                    let (handler, url_ref) =
+                        get_media_info.nullable().into_batch_ref(batch_serializer)?;
+                    (
+                        PendingInteractiveMediaHeaderBatchHandler::FromId(handler),
+                        url_ref.url(),
+                    )
+                }
+                Self::FromLink(link) => (PendingInteractiveMediaHeaderBatchHandler::FromLink, link),
+            };
 
-        Ok((h, request))
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.source.size_hint()
-    }
-
-    requests_batch_include! {}
-}
-
-#[cfg(feature = "batch")]
-impl StagedInteractiveHeader {
-    fn into_batch_ref(
-        self,
-        batch_serializer: &mut crate::batch::BatchSerializer,
-    ) -> Result<
-        (
-            (NullableUploadMediaHandler, NullableGetMediaInfoHandler),
-            String,
-        ),
-        crate::batch::FormatError,
-    > {
-        // I'm not sure if depending on a request gives the dependent request
-        // the auth. We'd just go from then_nullable into the batch
-
-        use crate::batch::{Nullable as _, Requests as _};
-        let auth = self.upload_media.request.auth.clone();
-
-        let (upload_media_handler, upload_media_ref) = self
-            .upload_media
-            .nullable()
-            .into_batch_ref(batch_serializer)?;
-        let media_id_ref = upload_media_ref.0;
-
-        let mut get_media_info = self.client.get_media_info(&media_id_ref);
-        if let Some(auth) = auth {
-            get_media_info = get_media_info.with_auth(auth)
+            Ok((handler, Self::ResponseReference { link }))
         }
 
-        let (get_media_info_handler, media_info_ref) =
-            get_media_info.nullable().into_batch_ref(batch_serializer)?;
-
-        let url_ref = media_info_ref.url();
-
-        Ok(((upload_media_handler, get_media_info_handler), url_ref))
-    }
-}
-
-#[cfg(feature = "batch")]
-impl crate::batch::Requests for PendingInteractiveMediaHeader {
-    type BatchHandler = PendingInteractiveMediaHeaderBatchHandler;
-
-    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
-
-    fn into_batch_ref(
-        self,
-        batch_serializer: &mut crate::batch::BatchSerializer,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        // Won't work but for completeness
-        let (handler, link) = match self {
-            Self::FromUpload(upload_media) => {
-                let (handlers, url_ref) = upload_media.into_batch_ref(batch_serializer)?;
-
-                (
-                    PendingInteractiveMediaHeaderBatchHandler::FromUpload(handlers),
-                    url_ref,
-                )
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            match self {
+                Self::FromUpload(_) => (2, None),
+                Self::FromId(_) => (1, Some(1)),
+                Self::FromLink(_) => (0, Some(0)),
             }
-            Self::FromId(get_media_info) => {
-                use crate::batch::Nullable as _;
+        }
 
-                let (handler, url_ref) =
-                    get_media_info.nullable().into_batch_ref(batch_serializer)?;
-                (
-                    PendingInteractiveMediaHeaderBatchHandler::FromId(handler),
-                    url_ref.url(),
-                )
-            }
-            Self::FromLink(link) => (PendingInteractiveMediaHeaderBatchHandler::FromLink, link),
-        };
-
-        Ok((handler, Self::ResponseReference { link }))
+        requests_batch_include! {}
     }
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Self::FromUpload(_) => (2, None),
-            Self::FromId(_) => (1, Some(1)),
-            Self::FromLink(_) => (0, Some(0)),
+    #[allow(clippy::enum_variant_names)]
+    pub(crate) enum PendingInteractiveMediaHeaderBatchHandler {
+        FromUpload((NullableUploadMediaHandler, NullableGetMediaInfoHandler)),
+        FromId(NullableGetMediaInfoHandler),
+        FromLink,
+    }
+
+    impl Handler for PendingInteractiveMediaHeaderBatchHandler {
+        type Responses = ();
+
+        fn from_batch(
+            self,
+            response: &mut BatchResponse,
+        ) -> Result<Self::Responses, ResponseProcessingError> {
+            match self {
+                Self::FromUpload((first, second)) => {
+                    first.from_batch(response)?;
+                    second.from_batch(response)?;
+                    Ok(())
+                }
+                Self::FromId(id) => {
+                    id.from_batch(response)?;
+                    Ok(())
+                }
+                Self::FromLink => Ok(()),
+            }
         }
     }
 
-    requests_batch_include! {}
-}
+    impl<'t> Requests for PendingMessagePayload<'t> {
+        type BatchHandler = <PendingContentPayload as Requests>::BatchHandler;
 
-#[cfg(feature = "batch")]
-#[allow(clippy::enum_variant_names)]
-pub(crate) enum PendingInteractiveMediaHeaderBatchHandler {
-    FromUpload((NullableUploadMediaHandler, NullableGetMediaInfoHandler)),
-    FromId(NullableGetMediaInfoHandler),
-    FromLink,
-}
+        type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
 
-#[cfg(feature = "batch")]
-impl crate::batch::Handler for PendingInteractiveMediaHeaderBatchHandler {
-    type Responses = ();
+        #[inline]
+        fn into_batch_ref(
+            self,
+            f: &mut BatchSerializer,
+        ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
+            let (h, r) = self.content.into_batch_ref(f)?;
 
-    fn from_batch(
-        self,
-        response: &mut crate::batch::BatchResponse,
-    ) -> Result<Self::Responses, crate::batch::ResponseProcessingError> {
-        match self {
-            Self::FromUpload((first, second)) => {
-                first.from_batch(response)?;
-                second.from_batch(response)?;
-                Ok(())
-            }
-            Self::FromId(id) => {
-                id.from_batch(response)?;
-                Ok(())
-            }
-            Self::FromLink => Ok(()),
+            let request = Self::ResponseReference {
+                messaging_product: self.messaging_product,
+                biz_opaque_callback_data: self.biz_opaque_callback_data,
+                to: self.to,
+                context: self.context,
+                content: r,
+            };
+
+            Ok((h, request))
         }
+
+        #[inline]
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.content.size_hint()
+        }
+
+        requests_batch_include! {}
     }
-}
-
-#[cfg(feature = "batch")]
-impl<'t> crate::batch::Requests for PendingMessagePayload<'t> {
-    type BatchHandler = <PendingContentPayload as crate::batch::Requests>::BatchHandler;
-
-    type ResponseReference = <Self as IntoMessageRequestOutput>::Request;
-
-    #[inline]
-    fn into_batch_ref(
-        self,
-        f: &mut crate::batch::BatchSerializer,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        let (h, r) = self.content.into_batch_ref(f)?;
-
-        let request = Self::ResponseReference {
-            messaging_product: self.messaging_product,
-            biz_opaque_callback_data: self.biz_opaque_callback_data,
-            to: self.to,
-            context: self.context,
-            content: r,
-        };
-
-        Ok((h, request))
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.content.size_hint()
-    }
-
-    requests_batch_include! {}
 }
 
 // --- API Response and Helper Structs ---
-
-/// Media information API response.
-#[derive(Debug, Deserialize)]
-pub struct MediaInfo {
-    #[serde(deserialize_with = "deserialize_url_from_string")]
-    pub(crate) url: Url,
-    // Other fields like mime_type, sha256, file_size, id are omitted as they are not
-    // currently used by the library.
-}
-
-fn deserialize_url_from_string<'de, D>(d: D) -> Result<Url, D::Error>
+#[inline]
+pub(crate) fn deserialize_url_from_string<'de, D>(d: D) -> Result<Url, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1144,6 +1106,7 @@ pub(crate) struct WebhookConfigRequest<'a> {
 
 impl<'a> From<Cow<'a, WebhookConfig>> for WebhookConfigRequest<'a> {
     /// Creates a `WebhookConfigRequest` from a `WebhookConfig`, borrowing data where possible.
+    #[inline]
     fn from(config: Cow<'a, WebhookConfig>) -> Self {
         let (callback_url, verify_token) = match config {
             Cow::Borrowed(cfg) => (
@@ -1202,6 +1165,7 @@ pub(crate) struct RegisterPhoneRequest<'a> {
 
 impl<'a> RegisterPhoneRequest<'a> {
     /// Creates a new request from a 6-digit PIN.
+    #[inline]
     pub(crate) fn from_pin(pin: &'a str) -> Self {
         Self {
             messaging_product: "whatsapp",

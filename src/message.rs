@@ -203,6 +203,51 @@ impl Default for Content {
 }
 
 impl Content {
+    /// Returns the body of a `Text` message, if this is one.
+    ///
+    /// This only returns text from a `Content::Text` variant.
+    /// To get text from captions or order notes, use `text()`.
+    pub fn text_body(&self) -> Option<&str> {
+        match self {
+            Content::Text(text) => Some(&text.body),
+            _ => None,
+        }
+    }
+
+    /// Returns any primary text associated with the message content.
+    ///
+    /// This checks, in order:
+    /// 1. The body of a `Content::Text` message.
+    /// 2. The caption of a `Content::Media` message.
+    /// 3. The note of a `Content::Order` message.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Content::Text(text) => Some(&text.body),
+            Content::Media(media) => media.caption.as_ref().map(|t| t.body.as_str()),
+            Content::Order(order) => Some(&order.note.body),
+            _ => None,
+        }
+    }
+
+    /// Returns the `Media` payload, if this is a media message.
+    pub fn media(&self) -> Option<&Media> {
+        match self {
+            Content::Media(media) => Some(media),
+            _ => None,
+        }
+    }
+
+    /// Returns the `Button` payload, if this is an interactive button *click*.
+    ///
+    /// This only returns a value for `Content::Interactive(InteractiveContent::Click)`.
+    /// It does *not* return the buttons from an outgoing `InteractiveContent::Message`.
+    pub fn button_click(&self) -> Option<&Button> {
+        match self {
+            Content::Interactive(InteractiveContent::Click(button)) => Some(button),
+            _ => None,
+        }
+    }
+
     /// Download media content for this message (if it contains media)
     ///
     /// # Arguments
@@ -1646,6 +1691,31 @@ impl Button {
             phone_number: phone_number.into(),
         })
     }
+
+    /// Returns the callback ID (`id`) of a `Reply` or `Option` button.
+    ///
+    /// This is the payload sent to your webhook when a user
+    /// clicks a reply button or a list option.
+    pub fn callback_id(&self) -> Option<&str> {
+        match self {
+            Button::Reply(rb) => Some(&rb.call_back),
+            Button::Option(ob) => Some(&ob.call_back),
+            _ => None, // `Url` and `Call` buttons don't send callback IDs
+        }
+    }
+
+    /// Returns the visible label (display text) of the button.
+    ///
+    /// Note: This will return `None` for `Button::Call` as its
+    /// underlying `CallButton` struct was not provided in the context.
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Button::Reply(rb) => Some(&rb.label),
+            Button::Url(ub) => Some(&ub.label),
+            Button::Option(ob) => Some(&ob.label),
+            Button::Call(_) => None,
+        }
+    }
 }
 
 /// Options for displaying a product catalog within an interactive message.
@@ -2181,6 +2251,14 @@ pub struct Message {
 
     /// The current delivery status of the message.
     pub message_status: MessageStatus,
+}
+
+impl Deref for Message {
+    type Target = Content;
+
+    fn deref(&self) -> &Self::Target {
+        &self.content
+    }
 }
 
 impl Message {

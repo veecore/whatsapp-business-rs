@@ -125,6 +125,11 @@ macro_rules! NullableUnit {
                 }
             }
 
+            // TODO: `Update` almost took my life with its annoying bounds. Come back to this later
+            // and avoid bounding on struct throughout.
+            // pub type [<Nullable $T>] <$($life,)? $($g),*> =
+            //     crate::batch::MapHandle<$T <$($life,)? $($g),*>, [<Nullable $T Handler>] <$($life,)? $($g),*>>;
+
             impl_idempotent_nullable! {[<Nullable $T>] <$($life,)? $($g),*>}
 
             pub struct [<Nullable $T>] <$($life,)? $($g),*> {
@@ -443,7 +448,8 @@ macro_rules! SimpleOutputBatch {
                 }
 
                 #[inline]
-                fn into_batch(self, batch_serializer: &mut $crate::batch::BatchSerializer) -> Result<Self::BatchHandler, $crate::batch::FormatError> {
+                fn into_batch(self, batch_serializer: &mut $crate::batch::BatchSerializer)
+                     -> Result<Self::BatchHandler, $crate::batch::FormatError> {
                     // Extract the underlying request object.
                     let request = self.request();
 
@@ -928,7 +934,6 @@ macro_rules! flow {
             $($just_now_field)?|
             impl<$($life),*, $to_shed, $($generic),*>
                 $name <$($life,)* $($prev,)* $($just_now,)? $to_shed, $($generic),*> {
-                // FIXME: Horrible internal names get exposed
                 $vis fn $($just_now_field)?(&self) -> &$($just_now)? {
                     &self.$($just_now_field)?
                 }
@@ -1370,7 +1375,7 @@ macro_rules! ContentTraits {
                         )*
                         $(
                             Self::$variant $(([<$data:snake>]))? => {
-                                let (h, r) = $([<$data:snake>].into_batch_ref(batch_serializer)?)?; // FIXME: None is empty for now
+                                let (h, r) = $([<$data:snake>].into_batch_ref(batch_serializer)?)?;
                                 (Self::BatchHandler::$variant(h), Self::ResponseReference::$variant(r))
                             }
                         )*
@@ -1504,7 +1509,6 @@ macro_rules! ContentTraits {
                 )?
             )*
 
-            // FIXME: We should have Into<Text> here
             impl<T: Into<String> + Send> From<T> for $name {
                 #[inline]
                 fn from(value: T) -> Self {

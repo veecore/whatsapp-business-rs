@@ -230,7 +230,7 @@ impl<H: Handler + 'static> WebhookService<H> {
         _verify_token: &'a String,
     ) -> Arc<InnerServer<H, Option<AppSecret>, String>> {
         // TODO: Remove... this is because I noticed I was getting too stuck.
-        // SAFETY: Option<Cow<'static, String>> has same layout as Cow<'static, String>
+        // SAFETY: Option<String> has same layout as String
         unsafe { std::mem::transmute(self.inner.clone()) }
     }
 

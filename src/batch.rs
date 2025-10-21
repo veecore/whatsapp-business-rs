@@ -349,6 +349,9 @@ pub struct BatchExecute<Handler> {
     state: Result<BatchExecuteState<Handler>, FormatError>,
 }
 
+// The batch API endpoint is at the root of the graph API.
+const ROOT_ENDPOINT: Endpoint<'static> = Endpoint::without_version();
+
 impl<Handler> BatchExecute<Handler> {
     /// Internal constructor to create a `BatchExecute` from its component parts.
     #[inline]
@@ -368,8 +371,6 @@ impl<Handler> BatchExecute<Handler> {
             form = form.part(name, file_part);
         }
 
-        // The batch API endpoint is at the root of the graph API.
-        const ROOT_ENDPOINT: Endpoint<'static> = Endpoint::without_version();
         let request = client.post(ROOT_ENDPOINT);
 
         let me = Self {
@@ -778,6 +779,70 @@ pub trait Requests {
         Self::BatchHandler: Handler,
     {
         Map::new(self, f)
+    }
+
+    /// Transforms the request's handler using a closure.
+    ///
+    /// This is a low-level, internal-use-only method. It is a more general
+    /// version of `.map()` that allows transforming the `Handler` itself, not
+    /// just its output.
+    ///
+    /// Its primary purpose within this crate is to reduce code duplication
+    /// when implementing other request combinators (like `Nullable`).
+    ///
+    /// # Safety
+    ///
+    /// This method is marked `unsafe` because it is **extremely dangerous**
+    /// if used incorrectly. It gives the caller the power to replace the
+    /// handler responsible for parsing a request's response.
+    ///
+    /// If the provided closure `f` returns a handler `H` that does not
+    /// correctly consume its corresponding response from the batch's JSON
+    /// response array, it will break the entire batch parsing process.
+    ///
+    /// This will lead to a **response misalignment**, causing all subsequent
+    /// handlers to parse the wrong data, which can result in `Err` results,
+    /// panics, or silent data corruption.
+    ///
+    /// **Do not use this method** unless you are extending this crate and
+    /// fully understand the internal batch response parsing mechanism.
+    ///
+    /// ## Example of Misuse (Do NOT do this)
+    ///
+    /// ```rust,ignore
+    /// // This example demonstrates how replacing a valid handler with a
+    /// // no-op handler (`()`) breaks the response chain.
+    /// let requests = unsafe {
+    ///     client
+    ///         .message(PHONE_ID)
+    ///         .send(RECIPIENT, "First message!")
+    ///         .map_handle(|_valid_handler| {
+    ///             // 🛑 DANGER: The unit type `()` is a no-op handler.
+    ///             // It does not consume the "First message" response.
+    ///             ()
+    ///         })
+    ///         .include(client.message(PHONE_ID).send(RECIPIENT, "Second message"))
+    /// };
+    ///
+    /// // When this executes:
+    /// // 1. The handler for "First message" is `()`, so it does nothing.
+    /// // 2. The response for "First message" remains in the response array.
+    /// // 3. The handler for "Second message" runs next and consumes the
+    /// //    response for "First message", believing it to be its own.
+    /// // 4. The response for "Second message" is left unconsumed.
+    /// //
+    /// // This will now (correctly) fail with an `ExcessiveResponses` error,
+    /// // but in older versions, it could have led to silent data corruption.
+    /// let output = client.batch().include(requests).execute().await?;
+    /// ```
+    #[inline]
+    #[doc(hidden)]
+    unsafe fn map_handle<H, F>(self, f: F) -> MapHandle<Self, H, F>
+    where
+        F: FnOnce(Self::BatchHandler) -> H,
+        Self: Sized,
+    {
+        MapHandle::new(self, f)
     }
 }
 
@@ -1559,7 +1624,8 @@ where
 
     requests_batch_include! {}
 }
-// NOTE: Nullable for Map seems impossible... code
+// NOTE: Nullable for Map seems impossible unless we don't call map at all
+// which doesn't seem right...
 
 #[derive(Debug)]
 pub struct MapHandler<H, F> {
@@ -1583,6 +1649,62 @@ where
         let response = self.inner.from_batch(response)?;
         Ok((self.f)(response))
     }
+}
+
+#[doc(hidden)]
+pub struct MapHandle<R, H, F = fn(<R as Requests>::BatchHandler) -> H> {
+    r: R,
+    f: F,
+    _marker: PhantomData<H>,
+}
+
+impl<R, H, F> MapHandle<R, H, F> {
+    pub(crate) fn new(r: R, f: F) -> Self {
+        Self {
+            r,
+            f,
+            _marker: PhantomData,
+        }
+    }
+}
+
+#[doc(hidden)]
+impl<R, H, F> Requests for MapHandle<R, H, F>
+where
+    R: Requests,
+    F: FnOnce(R::BatchHandler) -> H,
+{
+    type BatchHandler = H;
+
+    type ResponseReference = R::ResponseReference;
+
+    #[inline]
+    fn into_batch_ref(
+        self,
+        batch_serializer: &mut BatchSerializer,
+    ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
+        let (handler, reference) = self.r.into_batch_ref(batch_serializer)?;
+        Ok(((self.f)(handler), reference))
+    }
+
+    #[inline]
+    fn into_batch(
+        self,
+        batch_serializer: &mut BatchSerializer,
+    ) -> Result<Self::BatchHandler, FormatError>
+    where
+        Self: Sized,
+    {
+        let handler = self.r.into_batch(batch_serializer)?;
+        Ok((self.f)(handler))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.r.size_hint()
+    }
+
+    requests_batch_include! {}
 }
 
 // SECTION: Response Handling
@@ -1610,9 +1732,24 @@ where
     /// final, often nested result type.
     #[inline]
     pub fn result(mut self) -> Result<H::Responses, BatchResponseError> {
-        self.handler
+        let result = self
+            .handler
             .from_batch(&mut self.response)
-            .map_err(|err| BatchResponseError { inner: err })
+            .map_err(|err| BatchResponseError { inner: err });
+
+        // Crucial, check that we consumed every response.
+        let remnant = self.response.responses.count();
+        if remnant != 0 {
+            Err(BatchResponseError {
+                inner: ResponseProcessingError::new(
+                    #[cfg(debug_assertions)]
+                    ROOT_ENDPOINT.as_url().into(),
+                    ResponseProcessingErrorKind::ExcessiveResponses { remnant },
+                ),
+            })
+        } else {
+            result
+        }
     }
 
     /// Consumes the `BatchOutput`, parses the responses, and flattens the result.
@@ -2163,8 +2300,13 @@ impl ResponseProcessingError {
 /// The specific categories of response processing errors.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ResponseProcessingErrorKind {
-    #[error("Expected {want} response(s), but only got {got}")]
+    #[error("Insufficient responses: Expected {want} response(s), but only got {got}")]
     InsufficientResponses { want: usize, got: usize },
+
+    /// Indicates that after all handlers ran, there were still responses left.
+    /// This typically points to an internal bug or a misaligned handler.    
+    #[error("Not all responses were consumed: {remnant} response(s) remain unparsed.")]
+    ExcessiveResponses { remnant: usize },
     #[error(
         "The API returned a null response where a valid one was required. \
          If this request can be null, consider using `nullable()` or `then_nullable()`."

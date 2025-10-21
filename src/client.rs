@@ -46,6 +46,7 @@ use crate::{
         self, IntoMessageRequestOutput,
         client::{
             AccessTokenRequest, MessageStatusRequest, PendingMessagePayload, SendMessageResponse,
+            deserialize_url_from_string,
         },
         execute_request,
     },
@@ -966,6 +967,12 @@ impl<'i> MessageManager<'i> {
         self.client.delete_media(media_id)
     }
 
+    /// Builds a request to get media information, such as its public URL.
+    #[inline]
+    pub fn get_media_info(&self, media_id: &str) -> GetMediaInfo {
+        self.client.get_media_info(media_id)
+    }
+
     // To the identity not message
     #[inline(always)]
     pub(crate) fn base_url(&self) -> Endpoint<'_, 2> {
@@ -1057,209 +1064,12 @@ IntoFuture! {
     }
 }
 
-#[cfg(feature = "batch")]
-impl<'a> crate::batch::Requests for SendMessage<'a> {
-    type BatchHandler = SendMessageHandler<'a>;
-
-    type ResponseReference = SendMessageResponseReference;
-
-    #[inline]
-    fn into_batch_ref(
-        mut self,
-        batch_serializer: &mut crate::batch::BatchSerializer,
-    ) -> Result<(Self::BatchHandler, Self::ResponseReference), crate::batch::FormatError> {
-        // REMEMBER TO ADD AUTH ON BODY
-        if let Some(auth) = &self.request.auth {
-            self.body = self.body.with_auth(Cow::Borrowed(auth.as_ref()))
-        }
-
-        let (h, body) = self.body.into_batch_ref(batch_serializer)?;
-        let request = self.request.json_object(body);
-        #[cfg(debug_assertions)]
-        let endpoint = request.endpoint.clone();
-
-        let mut request = batch_serializer.format_request(request);
-        let reference = SendMessageResponseReference {
-            reference_id: request.get_name(),
-        };
-
-        request.finish()?;
-        let handler = SendMessageHandler {
-            #[cfg(debug_assertions)]
-            endpoint: endpoint.into(),
-            dep_handler: h,
-        };
-
-        Ok((handler, reference))
-    }
-
-    #[inline]
-    fn into_batch(
-        mut self,
-        batch_serializer: &mut crate::batch::BatchSerializer,
-    ) -> Result<Self::BatchHandler, crate::batch::FormatError>
-    where
-        Self: Sized,
-    {
-        // REMEMBER TO ADD AUTH ON BODY
-        if let Some(auth) = &self.request.auth {
-            self.body = self.body.with_auth(Cow::Borrowed(auth.as_ref()))
-        }
-
-        let (h, body) = self.body.into_batch_ref(batch_serializer)?;
-        let request = self.request.json_object(body);
-        #[cfg(debug_assertions)]
-        let endpoint = request.endpoint.clone();
-
-        batch_serializer.format_request(request).finish()?;
-
-        let handler = SendMessageHandler {
-            #[cfg(debug_assertions)]
-            endpoint: endpoint.into(),
-            dep_handler: h,
-        };
-
-        Ok(handler)
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (1 + self.body.size_hint().0, None)
-    }
-
-    requests_batch_include! {}
-}
-
-/// A symbolic reference to the response of a `SendMessage` request.
-///
-/// This type can be used directly in other requests that expect a
-/// `MessageRef`. This enables you to compose dependent requests
-/// within a batch without needing the concrete ID or field value upfront.
-///
-/// ## Notes
-/// - Still only valid inside a batch context.
-/// - Should not be inspected at runtime (no field access).
-/// - Implements `Clone` so it can be reused in multiple dependents.
-/// - Implements [`ToValue`] so it can stand in for `MessageRef`.
-#[derive(Clone)]
-#[cfg(feature = "batch")]
-pub struct SendMessageResponseReference {
-    reference_id: Cow<'static, str>,
-}
-
-#[cfg(feature = "batch")]
-impl ToValue<'_, MessageRef> for SendMessageResponseReference {
-    #[inline]
-    fn to_value(self) -> Cow<'static, MessageRef> {
-        let id = self.reference_id;
-        let ref_message_id = reference!(id => SendMessageResponse => [messages[0]] [id]);
-        Cow::Owned(MessageRef::from(ref_message_id))
-    }
-}
-
-#[cfg(feature = "batch")]
-impl<'a> ToValue<'a, MessageRef> for &'a SendMessageResponseReference {
-    #[inline]
-    fn to_value(self) -> Cow<'static, MessageRef> {
-        let id = &self.reference_id;
-        let ref_message_id = reference!(id => SendMessageResponse => [messages[0]] [id]);
-        Cow::Owned(MessageRef::from(ref_message_id))
-    }
-}
-
-#[cfg(feature = "batch")]
-pub struct SendMessageHandler<'a> {
-    #[cfg(debug_assertions)]
-    endpoint: Cow<'static, str>,
-    dep_handler: <PendingMessagePayload<'a> as crate::batch::Requests>::BatchHandler,
-}
-
-#[cfg(feature = "batch")]
-impl crate::batch::Handler for SendMessageHandler<'_> {
-    type Responses = Result<MessageCreate, Error>;
-
-    #[inline]
-    fn from_batch(
-        self,
-        response: &mut crate::batch::BatchResponse,
-    ) -> Result<Self::Responses, crate::batch::ResponseProcessingError> {
-        // First read the possible dep requests... all we're interested
-        // in is the error and reading past
-        self.dep_handler.from_batch(response)?;
-
-        response.try_next(
-            #[cfg(debug_assertions)]
-            self.endpoint,
-        )
-    }
-}
-
-// The internals of SendMessage are okay being nulled
-#[cfg(feature = "batch")]
-NullableUnit! {SendMessage<'a,>}
-
 SimpleOutput! {
    {Payload: MessageStatusRequest<'a>} SetReplying<'a> => ()
 }
 
-/// A symbolic reference to the response of a `SetReplying` request.
-///
-/// This type is a placeholder for the eventual response and cannot be
-/// inspected directly. It is only valid within a batch context, where it
-/// can be passed to `.then()` or `.then_nullable()` to compose dependent
-/// requests.
-///
-/// ## Notes
-/// - Not usable outside of batch building.
-/// - Cannot be read or matched against at runtime.
-/// - Opaque: only pass it to request builders.
-/// - Implements `Clone` so it can be reused across multiple dependents.
-#[derive(Clone)]
-#[cfg(feature = "batch")]
-pub struct SetReplyingResponseReference {
-    _priv: (),
-}
-
-#[cfg(feature = "batch")]
-impl crate::batch::IntoResponseReference for SetReplying<'_> {
-    type ResponseReference = SetReplyingResponseReference;
-
-    #[inline]
-    fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
-        Self::ResponseReference { _priv: () }
-    }
-}
-
 SimpleOutput! {
     {Payload: MessageStatusRequest<'a>} SetRead<'a> => ()
-}
-
-/// A symbolic reference to the response of a `SetRead` request.
-///
-/// This type is a placeholder for the eventual response and cannot be
-/// inspected directly. It is only valid within a batch context, where it
-/// can be passed to `.then()` or `.then_nullable()` to compose dependent
-/// requests.
-///
-/// ## Notes
-/// - Not usable outside of batch building.
-/// - Cannot be read or matched against at runtime.
-/// - Opaque: only pass it to request builders.
-/// - Implements `Clone` so it can be reused across multiple dependents.
-#[derive(Clone)]
-#[cfg(feature = "batch")]
-pub struct SetReadResponseReference {
-    _priv: (),
-}
-
-#[cfg(feature = "batch")]
-impl crate::batch::IntoResponseReference for SetRead<'_> {
-    type ResponseReference = SetReadResponseReference;
-
-    #[inline]
-    fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
-        Self::ResponseReference { _priv: () }
-    }
 }
 
 /// A builder for uploading media to WhatsApp.
@@ -1330,62 +1140,306 @@ IntoFuture! {
     }
 }
 
-/// A symbolic reference to the response of a `UploadMedia` request.
-///
-/// This type is a placeholder for the eventual response and cannot be
-/// inspected directly. It is only valid within a batch context, where it
-/// can be passed to `.then()` or `.then_nullable()` to compose dependent
-/// requests.
-///
-/// ## Notes
-/// - Not usable outside of batch building.
-/// - Cannot be read or matched against at runtime.
-/// - Opaque: only pass it to request builders.
-/// - Implements `Clone` so it can be reused across multiple dependents.
-#[derive(Clone, Debug)]
-#[cfg(feature = "batch")]
-pub struct UploadMediaResponseReference(pub(crate) String);
-
-#[cfg(feature = "batch")]
-impl From<UploadMediaResponseReference> for MediaSource {
-    #[inline]
-    fn from(value: UploadMediaResponseReference) -> Self {
-        Self::Id(value.0)
-    }
-}
-
-#[cfg(feature = "batch")]
-NullableUnit! {UploadMedia <>}
-
 SimpleOutput! {
     DeleteMedia => ()
 }
 
-/// A symbolic reference to the response of a `DeleteMedia` request.
-///
-/// This type is a placeholder for the eventual response and cannot be
-/// inspected directly. It is only valid within a batch context, where it
-/// can be passed to `.then()` or `.then_nullable()` to compose dependent
-/// requests.
-///
-/// ## Notes
-/// - Not usable outside of batch building.
-/// - Cannot be read or matched against at runtime.
-/// - Opaque: only pass it to request builders.
-/// - Implements `Clone` so it can be reused across multiple dependents.
-#[derive(Clone)]
-#[cfg(feature = "batch")]
-pub struct DeleteMediaResponseReference {
-    _priv: (),
+SimpleOutput! {
+    GetMediaInfo => MediaInfo
 }
 
 #[cfg(feature = "batch")]
-impl crate::batch::IntoResponseReference for DeleteMedia {
-    type ResponseReference = DeleteMediaResponseReference;
+pub use batch::*;
 
-    #[inline]
-    fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
-        Self::ResponseReference { _priv: () }
+#[cfg(feature = "batch")]
+mod batch {
+    use crate::batch::{
+        BatchResponse, BatchSerializer, FormatError, Handler, IntoResponseReference, Requests,
+        ResponseProcessingError,
+    };
+
+    use super::*;
+
+    impl<'a> Requests for SendMessage<'a> {
+        type BatchHandler = SendMessageHandler<'a>;
+
+        type ResponseReference = SendMessageResponseReference;
+
+        #[inline]
+        fn into_batch_ref(
+            mut self,
+            batch_serializer: &mut BatchSerializer,
+        ) -> Result<(Self::BatchHandler, Self::ResponseReference), FormatError> {
+            // REMEMBER TO ADD AUTH ON BODY
+            if let Some(auth) = &self.request.auth {
+                self.body = self.body.with_auth(Cow::Borrowed(auth.as_ref()))
+            }
+
+            let (h, body) = self.body.into_batch_ref(batch_serializer)?;
+            let request = self.request.json_object(body);
+            #[cfg(debug_assertions)]
+            let endpoint = request.endpoint.clone();
+
+            let mut request = batch_serializer.format_request(request);
+            let reference = SendMessageResponseReference {
+                reference_id: request.get_name(),
+            };
+
+            request.finish()?;
+            let handler = SendMessageHandler {
+                #[cfg(debug_assertions)]
+                endpoint: endpoint.into(),
+                dep_handler: h,
+            };
+
+            Ok((handler, reference))
+        }
+
+        #[inline]
+        fn into_batch(
+            mut self,
+            batch_serializer: &mut BatchSerializer,
+        ) -> Result<Self::BatchHandler, FormatError>
+        where
+            Self: Sized,
+        {
+            // REMEMBER TO ADD AUTH ON BODY
+            if let Some(auth) = &self.request.auth {
+                self.body = self.body.with_auth(Cow::Borrowed(auth.as_ref()))
+            }
+
+            let (h, body) = self.body.into_batch_ref(batch_serializer)?;
+            let request = self.request.json_object(body);
+            #[cfg(debug_assertions)]
+            let endpoint = request.endpoint.clone();
+
+            batch_serializer.format_request(request).finish()?;
+
+            let handler = SendMessageHandler {
+                #[cfg(debug_assertions)]
+                endpoint: endpoint.into(),
+                dep_handler: h,
+            };
+
+            Ok(handler)
+        }
+
+        #[inline]
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (1 + self.body.size_hint().0, None)
+        }
+
+        requests_batch_include! {}
+    }
+
+    /// A symbolic reference to the response of a `SendMessage` request.
+    ///
+    /// This type can be used directly in other requests that expect a
+    /// `MessageRef`. This enables you to compose dependent requests
+    /// within a batch without needing the concrete ID or field value upfront.
+    ///
+    /// ## Notes
+    /// - Still only valid inside a batch context.
+    /// - Should not be inspected at runtime (no field access).
+    /// - Implements `Clone` so it can be reused in multiple dependents.
+    /// - Implements [`ToValue`] so it can stand in for `MessageRef`.
+    #[derive(Clone)]
+    pub struct SendMessageResponseReference {
+        reference_id: Cow<'static, str>,
+    }
+
+    impl ToValue<'_, MessageRef> for SendMessageResponseReference {
+        #[inline]
+        fn to_value(self) -> Cow<'static, MessageRef> {
+            let id = self.reference_id;
+            let ref_message_id = reference!(id => SendMessageResponse => [messages[0]] [id]);
+            Cow::Owned(MessageRef::from(ref_message_id))
+        }
+    }
+
+    impl<'a> ToValue<'a, MessageRef> for &'a SendMessageResponseReference {
+        #[inline]
+        fn to_value(self) -> Cow<'static, MessageRef> {
+            let id = &self.reference_id;
+            let ref_message_id = reference!(id => SendMessageResponse => [messages[0]] [id]);
+            Cow::Owned(MessageRef::from(ref_message_id))
+        }
+    }
+
+    pub struct SendMessageHandler<'a> {
+        #[cfg(debug_assertions)]
+        endpoint: Cow<'static, str>,
+        dep_handler: <PendingMessagePayload<'a> as Requests>::BatchHandler,
+    }
+
+    impl Handler for SendMessageHandler<'_> {
+        type Responses = Result<MessageCreate, Error>;
+
+        #[inline]
+        fn from_batch(
+            self,
+            response: &mut BatchResponse,
+        ) -> Result<Self::Responses, ResponseProcessingError> {
+            // First read the possible dep requests... all we're interested
+            // in is the error and reading past
+            self.dep_handler.from_batch(response)?;
+
+            response.try_next(
+                #[cfg(debug_assertions)]
+                self.endpoint,
+            )
+        }
+    }
+
+    // The internals of SendMessage are okay being nulled
+    NullableUnit! {SendMessage<'a,>}
+
+    /// A symbolic reference to the response of a `SetReplying` request.
+    ///
+    /// This type is a placeholder for the eventual response and cannot be
+    /// inspected directly. It is only valid within a batch context, where it
+    /// can be passed to `.then()` or `.then_nullable()` to compose dependent
+    /// requests.
+    ///
+    /// ## Notes
+    /// - Not usable outside of batch building.
+    /// - Cannot be read or matched against at runtime.
+    /// - Opaque: only pass it to request builders.
+    /// - Implements `Clone` so it can be reused across multiple dependents.
+    #[derive(Clone)]
+    pub struct SetReplyingResponseReference {
+        _priv: (),
+    }
+
+    impl IntoResponseReference for SetReplying<'_> {
+        type ResponseReference = SetReplyingResponseReference;
+
+        #[inline]
+        fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
+            Self::ResponseReference { _priv: () }
+        }
+    }
+
+    /// A symbolic reference to the response of a `SetRead` request.
+    ///
+    /// This type is a placeholder for the eventual response and cannot be
+    /// inspected directly. It is only valid within a batch context, where it
+    /// can be passed to `.then()` or `.then_nullable()` to compose dependent
+    /// requests.
+    ///
+    /// ## Notes
+    /// - Not usable outside of batch building.
+    /// - Cannot be read or matched against at runtime.
+    /// - Opaque: only pass it to request builders.
+    /// - Implements `Clone` so it can be reused across multiple dependents.
+    #[derive(Clone)]
+    pub struct SetReadResponseReference {
+        _priv: (),
+    }
+
+    impl IntoResponseReference for SetRead<'_> {
+        type ResponseReference = SetReadResponseReference;
+
+        #[inline]
+        fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
+            Self::ResponseReference { _priv: () }
+        }
+    }
+
+    /// A symbolic reference to the response of a `UploadMedia` request.
+    ///
+    /// This type is a placeholder for the eventual response and cannot be
+    /// inspected directly. It is only valid within a batch context, where it
+    /// can be passed to `.then()` or `.then_nullable()` to compose dependent
+    /// requests.
+    ///
+    /// ## Notes
+    /// - Not usable outside of batch building.
+    /// - Cannot be read or matched against at runtime.
+    /// - Opaque: only pass it to request builders.
+    /// - Implements `Clone` so it can be reused across multiple dependents.
+    #[derive(Clone, Debug)]
+    pub struct UploadMediaResponseReference(pub(crate) String);
+
+    impl From<UploadMediaResponseReference> for MediaSource {
+        #[inline]
+        fn from(value: UploadMediaResponseReference) -> Self {
+            Self::Id(value.0)
+        }
+    }
+
+    impl UploadMediaResponseReference {
+        /// NOTE: This is only a reference and should be used with care        
+        pub fn id(self) -> String {
+            self.0
+        }
+    }
+
+    NullableUnit! {UploadMedia <>}
+
+    /// A symbolic reference to the response of a `DeleteMedia` request.
+    ///
+    /// This type is a placeholder for the eventual response and cannot be
+    /// inspected directly. It is only valid within a batch context, where it
+    /// can be passed to `.then()` or `.then_nullable()` to compose dependent
+    /// requests.
+    ///
+    /// ## Notes
+    /// - Not usable outside of batch building.
+    /// - Cannot be read or matched against at runtime.
+    /// - Opaque: only pass it to request builders.
+    /// - Implements `Clone` so it can be reused across multiple dependents.
+    #[derive(Clone)]
+    pub struct DeleteMediaResponseReference {
+        _priv: (),
+    }
+
+    impl IntoResponseReference for DeleteMedia {
+        type ResponseReference = DeleteMediaResponseReference;
+
+        #[inline]
+        fn into_response_reference(_: Cow<'static, str>) -> Self::ResponseReference {
+            Self::ResponseReference { _priv: () }
+        }
+    }
+
+    // Batching support for GetMediaInfo
+    #[derive(Clone)]
+    pub struct GetMediaInfoResponseReference {
+        reference_id: Cow<'static, str>,
+    }
+
+    impl GetMediaInfoResponseReference {
+        /// NOTE: This is only a reference and should be used with care
+        pub fn url(self) -> String {
+            let id = self.reference_id;
+            reference!(id => MediaInfo => [url])
+        }
+    }
+
+    impl IntoResponseReference for GetMediaInfo {
+        type ResponseReference = GetMediaInfoResponseReference;
+
+        #[inline]
+        fn into_response_reference(reference_id: Cow<'static, str>) -> Self::ResponseReference {
+            Self::ResponseReference { reference_id }
+        }
+    }
+
+    /// Media information API response.
+    #[derive(Debug, serde::Deserialize)]
+    pub struct MediaInfo {
+        #[serde(deserialize_with = "deserialize_url_from_string")]
+        pub(crate) url: reqwest::Url,
+        // TODO: Expose
+        // Other fields like mime_type, sha256, file_size, id are omitted as they are not
+        // currently used by the library.
+    }
+
+    impl MediaInfo {
+        pub fn url(&self) -> &str {
+            self.url.as_str()
+        }
     }
 }
 

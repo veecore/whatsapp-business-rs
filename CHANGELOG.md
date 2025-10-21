@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.1] - 2025-10-21
+
+### ❗ Fixed
+- **Critical Batch Safety:** Fixed a critical bug in batch processing where a handler failing to consume its response could lead to **response misalignment** for all subsequent requests. The batch parser now strictly checks that all responses are consumed and will return an `ExcessiveResponses` error if any remain, preventing silent failures and data corruption.
+
+### ✨ Added
+- Added `MessageManager::get_media_info` for retrieving media information and public URLs from meta servers.
+- Added several ergonomic getters to `message::Content`:
+  - `text_body()`: Gets text from a `Text` message only.
+  - `text()`: Gets the primary text from a `Text` body, `Media` caption, or `Order` note.
+  - `media()`: Returns the `Media` payload, if present.
+  - `button_click()`: Returns the `Button` payload from an interactive click response.
+- Added `callback_id()` and `label()` getters to `message::Button`.
+- Implemented `Deref<Target = Content>` for `Message`, allowing direct access to all new `Content` getters (e.g., `my_message.text()`).
+
+### ⚠️ Changed
+- `Requests::map_handle` is now marked `unsafe` and its documentation has been expanded to strongly warn against its use, as it can easily break batch parsing guarantees.
+
+### 📦 Refactored
+- (Internal) Reorganized all `batch` feature-gated code into separate sub-modules for better project structure and maintainability.
+
 ## [0.4.0] - 2025-10-20
 
 ### Added

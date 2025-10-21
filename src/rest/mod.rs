@@ -11,7 +11,7 @@ use crate::{
     app::{Token, TokenDebug},
     batch::BatchSubResponse,
     catalog::Product,
-    client::{Auth, Client, MessageManager, PendingRequest},
+    client::{Auth, Client, MediaInfo, MessageManager, PendingRequest},
     error::{Error, ServiceErrorKind},
     message::{
         Button, ErrorContent, InteractiveAction, InteractiveHeaderMedia, Location, Media, Order,
@@ -20,9 +20,7 @@ use crate::{
     waba::{Catalog, FlowInfo, PhoneNumber, RegisterResponse},
 };
 use async_stream::try_stream;
-use client::{
-    MediaInfo, MediaUploadResponse, SendMessageResponse, ShareCreditLineResponse, SuccessStatus,
-};
+use client::{MediaUploadResponse, SendMessageResponse, ShareCreditLineResponse, SuccessStatus};
 use futures::TryStream;
 use reqwest::{RequestBuilder, multipart::Form};
 use serde::{Deserialize, Serialize};
@@ -57,7 +55,7 @@ pub(crate) trait FromResponse<'a>: Sized + Send {
 pub(crate) trait FromResponseOwned: for<'a> FromResponse<'a> {}
 impl<T> FromResponseOwned for T where T: for<'de> FromResponse<'de> {}
 
-// FIXME: Make less annoying and make preparation fallible
+// FIXME: Make less annoying
 
 /// A trait for preparing a message to be sent via the API.
 ///
