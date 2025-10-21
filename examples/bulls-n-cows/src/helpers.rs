@@ -565,9 +565,10 @@ My turn! I'm guessing `{call}`. How did I do?"
             (user_grade.grade, user_grade.target.expect("include target"));
         let (bot_grade, bot_guess) = (bot_grade.grade, bot_grade.target.expect("include target"));
 
+        // FIXED: Human grade was swapped for bot's... very silly
         // Get flavor text for both scores.
-        let bot_comment = Self::bot_commentary(bot_grade); // Commentary on bot's score
-        let user_comment = Self::user_commentary(user_grade); // Commentary on user's score
+        let bot_comment = Self::bot_commentary(user_grade); // Commentary on bot's score
+        let user_comment = Self::user_commentary(bot_grade); // Commentary on user's score
 
         let response = format!(
             "{user_comment}
