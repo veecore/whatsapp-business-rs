@@ -7,10 +7,16 @@ use std::{borrow::Cow, fmt::Debug, future::Future, hash::Hash, marker::PhantomDa
 #[cfg(feature = "batch")]
 use crate::batch::{BatchSerializer, BatchSubResponse};
 use crate::{
-    app::{Token, TokenDebug}, catalog::Product, client::{Auth, Client, MediaInfo, MessageManager, PendingRequest}, error::{Error, ServiceErrorKind}, message::{
+    IdentityRef, Timestamp,
+    app::{Token, TokenDebug},
+    catalog::Product,
+    client::{Auth, Client, MediaInfo, MessageManager, PendingRequest},
+    error::{Error, ServiceErrorKind},
+    message::{
         Button, ErrorContent, InteractiveAction, InteractiveHeaderMedia, Location, Media, Order,
         Reaction, Text,
-    }, waba::{Catalog, FlowInfo, PhoneNumber, RegisterResponse}, IdentityRef, Timestamp
+    },
+    waba::{Catalog, FlowInfo, PhoneNumber, RegisterResponse},
 };
 use async_stream::try_stream;
 use client::{MediaUploadResponse, SendMessageResponse, ShareCreditLineResponse, SuccessStatus};
@@ -187,9 +193,7 @@ impl_from_response_for_deserializable!(
 );
 
 #[cfg(feature = "batch")]
-impl_from_response_for_deserializable!(
-    BatchSubResponse,
-);
+impl_from_response_for_deserializable!(BatchSubResponse,);
 
 impl_into_request_for_serializable!(
     Location,
@@ -281,7 +285,6 @@ where
 {
     None
 }
-
 
 impl<'de> Deserialize<'de> for Timestamp {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

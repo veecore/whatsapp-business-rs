@@ -28,10 +28,7 @@ use crate::{
     },
 };
 
-use super::{
-    FromResponse,
-    client::ContentResponse,
-};
+use super::{FromResponse, client::ContentResponse};
 
 #[cfg(feature = "incoming_message_ext")]
 use crate::client::Client;

@@ -32,7 +32,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::io::AsyncWrite;
 
 #[cfg(feature = "batch")]
-use crate::client::{NullableGetMediaInfoHandler, NullableUploadMediaHandler, UploadMediaResponseReference};
+use crate::client::{
+    NullableGetMediaInfoHandler, NullableUploadMediaHandler, UploadMediaResponseReference,
+};
 
 // --- Core Media Operations ---
 

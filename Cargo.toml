@@ -1,6 +1,6 @@
 [package]
 name = "whatsapp-business-rs"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 authors = ["Victor <victorayo206@example.com>"]
 description = "Rust SDK for the WhatsApp Business API — bulk messaging, batching, and multi-tenant support."
