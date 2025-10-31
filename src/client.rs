@@ -37,6 +37,7 @@
 //! ```
 
 use super::error::Error;
+#[allow(unused_imports)]
 use crate::{
     App, CatalogRef, Fields, IdentityRef, ToValue, Waba,
     app::{AppManager, Token},
@@ -67,7 +68,7 @@ use std::{
 use crate::batch::Batch;
 
 /// Default API version for WhatsApp Business API
-const DEFAULT_API_VERSION: &str = "22.0";
+const DEFAULT_API_VERSION: &str = "24.0";
 /// Default user agent for the client
 const USER_AGENT: &str = concat!(
     "whatsapp-business-rs/",
@@ -1148,6 +1149,22 @@ SimpleOutput! {
     GetMediaInfo => MediaInfo
 }
 
+/// Media information API response.
+#[derive(Debug, serde::Deserialize)]
+pub struct MediaInfo {
+    #[serde(deserialize_with = "deserialize_url_from_string")]
+    pub(crate) url: reqwest::Url,
+    // TODO: Expose
+    // Other fields like mime_type, sha256, file_size, id are omitted as they are not
+    // currently used by the library.
+}
+
+impl MediaInfo {
+    pub fn url(&self) -> &str {
+        self.url.as_str()
+    }
+}
+
 #[cfg(feature = "batch")]
 pub use batch::*;
 
@@ -1423,22 +1440,6 @@ mod batch {
         #[inline]
         fn into_response_reference(reference_id: Cow<'static, str>) -> Self::ResponseReference {
             Self::ResponseReference { reference_id }
-        }
-    }
-
-    /// Media information API response.
-    #[derive(Debug, serde::Deserialize)]
-    pub struct MediaInfo {
-        #[serde(deserialize_with = "deserialize_url_from_string")]
-        pub(crate) url: reqwest::Url,
-        // TODO: Expose
-        // Other fields like mime_type, sha256, file_size, id are omitted as they are not
-        // currently used by the library.
-    }
-
-    impl MediaInfo {
-        pub fn url(&self) -> &str {
-            self.url.as_str()
         }
     }
 }

@@ -405,6 +405,7 @@ macro_rules! IntoFuture {
 ///
 /// It creates a `[Name]Handler` struct responsible for parsing the response
 /// for this specific request out of a larger batch response.
+#[cfg(feature = "batch")]
 macro_rules! SimpleOutputBatch {
     ($name:ident <$($life:lifetime,)? $([$g:ty: $($b:tt)*]),*> => $out:ty) => {
         paste::paste!{
@@ -672,6 +673,7 @@ macro_rules! SimpleOutput {
             }
         }
 
+        #[allow(dead_code)]
         impl$(<$life>)? $name$(<$life>)? {
             #[inline(always)]
             pub(crate) fn request(self) ->

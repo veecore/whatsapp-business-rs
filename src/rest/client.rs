@@ -15,7 +15,6 @@ use crate::{
     catalog::{MetaProductRef, ProductCreate, ProductRef},
     client::{
         Auth, Client, DeleteMedia, GetMediaInfo, MessageManager, PendingRequest, UploadMedia,
-        UploadMediaResponseReference,
     },
     error::{Error, ServiceError, ServiceErrorKind},
     message::{
@@ -33,7 +32,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::io::AsyncWrite;
 
 #[cfg(feature = "batch")]
-use crate::client::{NullableGetMediaInfoHandler, NullableUploadMediaHandler};
+use crate::client::{NullableGetMediaInfoHandler, NullableUploadMediaHandler, UploadMediaResponseReference};
 
 // --- Core Media Operations ---
 
@@ -489,6 +488,7 @@ impl IntoMessageRequest for InteractiveHeaderMedia {
 
 pub(crate) type ContentPayload = crate::message::ContentRequest;
 pub(crate) type PendingContentPayload = crate::message::ContentOutput;
+#[allow(dead_code)]
 pub(crate) type ContentResponse<'a> = crate::message::ContentResponse<'a>;
 
 impl Draft {

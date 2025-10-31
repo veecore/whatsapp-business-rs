@@ -5,19 +5,12 @@
 use std::{borrow::Cow, fmt::Debug, future::Future, hash::Hash, marker::PhantomData};
 
 #[cfg(feature = "batch")]
-use crate::batch::BatchSerializer;
+use crate::batch::{BatchSerializer, BatchSubResponse};
 use crate::{
-    IdentityRef,
-    app::{Token, TokenDebug},
-    batch::BatchSubResponse,
-    catalog::Product,
-    client::{Auth, Client, MediaInfo, MessageManager, PendingRequest},
-    error::{Error, ServiceErrorKind},
-    message::{
+    app::{Token, TokenDebug}, catalog::Product, client::{Auth, Client, MediaInfo, MessageManager, PendingRequest}, error::{Error, ServiceErrorKind}, message::{
         Button, ErrorContent, InteractiveAction, InteractiveHeaderMedia, Location, Media, Order,
         Reaction, Text,
-    },
-    waba::{Catalog, FlowInfo, PhoneNumber, RegisterResponse},
+    }, waba::{Catalog, FlowInfo, PhoneNumber, RegisterResponse}, IdentityRef, Timestamp
 };
 use async_stream::try_stream;
 use client::{MediaUploadResponse, SendMessageResponse, ShareCreditLineResponse, SuccessStatus};
@@ -190,8 +183,12 @@ impl_from_response_for_deserializable!(
     RegisterResponse,
     Token,
     ShareCreditLineResponse,
-    BatchSubResponse,
     FlowInfo
+);
+
+#[cfg(feature = "batch")]
+impl_from_response_for_deserializable!(
+    BatchSubResponse,
 );
 
 impl_into_request_for_serializable!(
@@ -283,6 +280,18 @@ where
     T: FromResponse<'a>,
 {
     None
+}
+
+
+impl<'de> Deserialize<'de> for Timestamp {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Timestamp {
+            inner: client::deserialize_str::<i64, D>(deserializer)?,
+        })
+    }
 }
 
 // --- Pagination Logic ---

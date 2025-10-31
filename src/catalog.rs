@@ -66,6 +66,7 @@
 //! [`Product`]: crate::catalog::Product
 //! [`ProductData`]: crate::catalog::ProductData
 
+#[allow(unused_imports)]
 use crate::rest::client::{CreateProductResponse, deserialize_str_opt};
 use crate::{CatalogRef, ToValue, Update, client::FieldsQuery, rest::BuilderInto, waba::Catalog};
 use std::{borrow::Cow, ops::Deref};
@@ -745,6 +746,7 @@ impl ToValue<'_, MetaProductRef> for ProductCreate {
     }
 }
 
+#[cfg(feature = "batch")]
 impl<'m> ToValue<'m, MetaProductRef> for &'m CreateProductResponseReference {
     #[inline]
     fn to_value(self) -> Cow<'static, MetaProductRef> {
@@ -754,6 +756,7 @@ impl<'m> ToValue<'m, MetaProductRef> for &'m CreateProductResponseReference {
     }
 }
 
+#[cfg(feature = "batch")]
 impl ToValue<'_, MetaProductRef> for CreateProductResponseReference {
     #[inline]
     fn to_value(self) -> Cow<'static, MetaProductRef> {

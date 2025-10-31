@@ -30,7 +30,7 @@ use crate::{
 
 use super::{
     FromResponse,
-    client::{ContentResponse, deserialize_str},
+    client::ContentResponse,
 };
 
 #[cfg(feature = "incoming_message_ext")]
@@ -651,17 +651,6 @@ pub(crate) fn deserialize_origin<'de, D: Deserializer<'de>>(
 
     let helper = <Option<Object>>::deserialize(deserializer)?;
     Ok(helper.map(|o| o.r#type))
-}
-
-impl<'de> Deserialize<'de> for Timestamp {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Ok(Timestamp {
-            inner: deserialize_str::<i64, D>(deserializer)?,
-        })
-    }
 }
 
 #[cfg(test)]

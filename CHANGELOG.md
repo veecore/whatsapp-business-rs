@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.2] - 2025-10-31
+
+### 🧰 Maintenance
+
+* **CI Improvements:**
+
+  * Added a `cargo check --no-default-features` step to ensure builds succeed when default features are disabled.
+  * Enforced format, lint, and test checks to run consistently across feature configurations.
+
+### ⚙️ Changed
+
+* **Meta API Updated:**
+  Upgraded Meta Graph API version from **v22.0 → v24.0** for improved compatibility and continued support.
+
+----------
+
 ## [0.4.1] - 2025-10-21
 
 ### ❗ Fixed
@@ -20,6 +36,8 @@
 
 ### 📦 Refactored
 - (Internal) Reorganized all `batch` feature-gated code into separate sub-modules for better project structure and maintainability.
+
+----------
 
 ## [0.4.0] - 2025-10-20
 
