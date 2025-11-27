@@ -2800,6 +2800,7 @@ mod tests {
         assert_is_requests::<super::Map<SomeRequest, fn(()) -> i32>>();
     }
 
+    #[cfg(nightly_rust)]
     #[test]
     fn test_static_handle_regression() {
         let client = ClientBuilder::new().build().unwrap();
