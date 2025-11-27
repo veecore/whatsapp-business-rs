@@ -436,12 +436,9 @@ impl<Handler> BatchExecute<Handler> {
     }
 }
 
-IntoFuture! {
 impl<H> BatchExecute<H>
-[
 where
     H: Handler + Send,
-    ]
 {
     /// Sends the batch request and returns a `BatchOutput`.
     ///
@@ -455,20 +452,35 @@ where
         };
 
         #[cfg(not(debug_assertions))]
-        let handle = async |response| {
-            Client::handle_response(response).await
-        };
+        let handle = async |response| Client::handle_response(response).await;
 
         async move {
             let state = self.state?;
-            let response
-                = execute_multipart_request(state.request, state.form, handle).await?;
-
+            let response = execute_multipart_request(state.request, state.form, handle).await?;
 
             Ok(BatchOutput::from_parts(state.handler, response))
         }
     }
 }
+
+#[cfg(nightly_rust)]
+impl<H: Handler + Send> ::std::future::IntoFuture for BatchExecute<H> {
+    type Output = Result<BatchOutput<H>, crate::Error>;
+    type IntoFuture = impl ::std::future::Future<Output = Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        self.execute()
+    }
+}
+
+#[cfg(not(nightly_rust))]
+impl<H: Handler + Send + 'static> ::std::future::IntoFuture for BatchExecute<H> {
+    type Output = Result<BatchOutput<H>, crate::Error>;
+    type IntoFuture = ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Self::Output> + Send>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.execute())
+    }
 }
 
 // SECTION: Traits
