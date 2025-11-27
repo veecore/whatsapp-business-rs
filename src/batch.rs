@@ -2443,7 +2443,7 @@ mod tests {
 
     use crate::{
         app::SubscriptionField,
-        client::{ChainQuery, ClientBuilder, FieldsQuery, TupleArrayShorthand},
+        client::{ChainQuery, FieldsQuery, TupleArrayShorthand},
         waba::PhoneNumberMetadataField,
     };
 
@@ -2803,7 +2803,7 @@ mod tests {
     #[cfg(nightly_rust)]
     #[test]
     fn test_static_handle_regression() {
-        let client = ClientBuilder::new().build().unwrap();
+        let client = crate::client::ClientBuilder::new().build().unwrap();
         // Data to be referenced accross handle to make it not static
         let data = String::new();
 
