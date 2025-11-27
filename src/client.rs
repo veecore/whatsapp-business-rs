@@ -1033,7 +1033,7 @@ impl SendMessage<'_> {
     /// detaching it from the original lifetime so it can be moved into `'static` contexts.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// // Without into_static, this fails because `incoming_message` is borrowed
     /// // tokio::spawn(async { incoming_message.reply("Hi").await });
     ///
