@@ -2124,21 +2124,19 @@ pub struct ErrorContent {
     pub errors: Vec<MetaError>,
 }
 
-derive! {
-    /// Lightweight reference to a [`Message`].
-    ///
-    /// Used primarily for message context (like replies) without needing to
-    /// load the full message content. It contains the message ID and
-    /// optionally the sender and recipient identities.
-    #[derive(#AnyField, Serialize, Eq, Clone, Debug)]
-    pub struct MessageRef {
-        #![anyfield("message_id", "id")]
-        pub(crate) message_id: String,
-        #[serde(flatten, skip_serializing)]
-        pub(crate) sender: Option<IdentityRef>,
-        #[serde(skip)]
-        pub(crate) recipient: Option<IdentityRef>,
-    }
+/// Lightweight reference to a [`Message`].
+///
+/// Used primarily for message context (like replies) without needing to
+/// load the full message content. It contains the message ID and
+/// optionally the sender and recipient identities.
+#[derive(Deserialize, Serialize, Eq, Clone, Debug)]
+pub struct MessageRef {
+    #[serde(alias = "id")]
+    pub(crate) message_id: String,
+    #[serde(flatten, skip_serializing)]
+    pub(crate) sender: Option<IdentityRef>,
+    #[serde(skip)]
+    pub(crate) recipient: Option<IdentityRef>,
 }
 
 impl MessageRef {
@@ -2489,6 +2487,33 @@ impl Draft {
         }
     }
 
+    /// Sets the message content to a specific geographic coordinate.
+    ///
+    /// This initiates a Location message. You can subsequently chain
+    /// [`location_name`](Self::location_name) and [`location_address`](Self::location_address)
+    /// to add details.
+    pub fn location(latitude: f64, longitude: f64) -> Self {
+        Self {
+            content: Content::Location(Location::new(latitude, longitude)),
+            ..Default::default()
+        }
+    }
+
+    /// Sets the message as a **Reaction** to a specific message.
+    ///
+    /// This is a shortcut for manually constructing a `Reaction` struct.
+    ///
+    /// # Arguments
+    /// * `emoji` - The emoji char (e.g., '👍', '❤️').
+    /// * `to` - The message you are reacting to.
+    pub fn react<'m>(emoji: char, to: impl ToValue<'m, MessageRef>) -> Self {
+        let reaction = Reaction::new(emoji, to);
+        Self {
+            content: Content::Reaction(reaction),
+            ..Default::default()
+        }
+    }
+
     /// Creates a message draft containing interactive content (buttons, lists, products).
     ///
     /// # Arguments
@@ -2626,6 +2651,21 @@ impl Draft {
         self
     }
 
+    /// Enables or disables the web page preview for URLs contained in the message text.
+    ///
+    /// # Behavior
+    /// * This setting only applies if the content is currently a [`Content::Text`] type.
+    /// * If set to `true`, WhatsApp will attempt to generate a preview card for the first URL found.
+    ///
+    /// # Arguments
+    /// * `preview_url` - `true` to enable previews, `false` to disable them.
+    pub fn preview_url(mut self, preview_url: bool) -> Self {
+        if let Content::Text(text) = &mut self.content {
+            text.preview_url = Some(preview_url);
+        }
+        self
+    }
+
     /// Adds a reply button to the message.
     ///
     /// This will convert the message to an interactive message with a `Keyboard`
@@ -2671,6 +2711,24 @@ impl Draft {
                 });
             }
         }
+        self
+    }
+
+    /// Replaces the current action with a standard WhatsApp "Call-to-Action" (CTA) URL button.
+    ///
+    /// This creates a dedicated button that opens a specific web link when tapped.
+    ///
+    /// # Note
+    /// This is distinct from [`Self::add_url_button`], which adds a button to a Quick Reply keyboard.
+    /// This method uses the native `cta_url` interactive action.
+    ///
+    /// # Arguments
+    /// * `url` - The target URL to open (e.g., "https://www.example.com").
+    /// * `label` - The text displayed on the button.
+    pub fn with_cta_url(mut self, url: impl Into<String>, label: impl Into<String>) -> Self {
+        let interactive = self.promote_to_interactive_mut();
+
+        interactive.action = InteractiveAction::Cta(UrlButton::new(url, label));
         self
     }
 
@@ -2726,6 +2784,68 @@ impl Draft {
             }
         }
         self
+    }
+
+    /// Adds a name to the location (e.g., "Headquarters").
+    ///
+    /// # Behavior
+    /// This method is a no-op if the current content is not already a [`Content::Location`].
+    /// You must call [`location`](Self::location) first.
+    pub fn location_name(mut self, name: impl Into<String>) -> Self {
+        if let Content::Location(loc) = &mut self.content {
+            loc.name = Some(name.into());
+        }
+        self
+    }
+
+    /// Adds a physical address to the location.
+    ///
+    /// # Behavior
+    /// This method is a no-op if the current content is not already a [`Content::Location`].
+    /// You must call [`location`](Self::location) first.
+    pub fn location_address(mut self, address: impl Into<String>) -> Self {
+        if let Content::Location(loc) = &mut self.content {
+            loc.address = Some(address.into());
+        }
+        self
+    }
+
+    /// Returns the number of buttons currently configured in the draft.
+    ///
+    /// This is useful for validation logic, as WhatsApp enforces limits on button counts
+    /// (e.g., maximum of 3 Reply Buttons).
+    ///
+    /// # Returns
+    /// * The count of buttons if the message is interactive and contains a keyboard or CTA.
+    /// * `0` if the message is text, media, or a list/catalog.
+    pub fn count_buttons(&self) -> usize {
+        if let Content::Interactive(InteractiveContent::Message(msg)) = &self.content {
+            match &msg.action {
+                InteractiveAction::Keyboard(keyboard) => keyboard.buttons.len(),
+                // A CTA URL is technically 1 button
+                InteractiveAction::Cta(_) => 1,
+                // Lists, Catalogs, etc. are not "Buttons" in the Reply Button sense
+                _ => 0,
+            }
+        } else {
+            0
+        }
+    }
+
+    /// Checks if the current draft is an Interactive message.
+    pub fn is_interactive(&self) -> bool {
+        matches!(self.content, Content::Interactive(_))
+    }
+
+    /// Checks if the current draft contains Media (Image, Video, Doc, etc.).
+    pub fn has_media(&self) -> bool {
+        matches!(self.content, Content::Media(_))
+        // Or if it's an interactive message with a media header:
+        || if let Content::Interactive(InteractiveContent::Message(msg)) = &self.content {
+             matches!(msg.header, Some(InteractiveHeader::Media(_)))
+           } else {
+             false
+           }
     }
 
     /// Prepares the draft message to be sent to a specific recipient.

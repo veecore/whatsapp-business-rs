@@ -358,7 +358,7 @@ macro_rules! IntoFuture {
         {
             // The `execute` function to be wrapped.
             $(#[$meta:meta])*
-            pub fn $func:ident ( $($args:tt)* ) -> impl Future<Output = $ret:ty> + $fut_life:lifetime $body:block
+            pub fn $func:ident ( $($args:tt)* ) -> impl Future<Output = $ret:ty> $(+ $fut_life:lifetime)? $body:block
         }
     ) => {
         // First, emit the original function implementation as-is.
@@ -366,7 +366,7 @@ macro_rules! IntoFuture {
         $(where $($wheres)*)?
         {
             $(#[$meta])*
-            pub fn $func($($args)*) -> impl ::std::future::Future<Output = $ret> + $fut_life $body
+            pub fn $func($($args)*) -> impl ::std::future::Future<Output = $ret> $(+ $fut_life)? $body
         }
 
         // Implementation for nightly Rust, which allows `impl Trait` in type aliases.
@@ -375,7 +375,7 @@ macro_rules! IntoFuture {
         $(where $($wheres)*)?
         {
             type Output = $ret;
-            type IntoFuture = impl ::std::future::Future<Output = Self::Output> + $fut_life;
+            type IntoFuture = impl ::std::future::Future<Output = Self::Output> $(+ $fut_life)?;
 
             fn into_future(self) -> Self::IntoFuture {
                 self.$func()
@@ -388,7 +388,7 @@ macro_rules! IntoFuture {
         $(where $($wheres)*)?
         {
             type Output = $ret;
-            type IntoFuture = ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Self::Output> + Send + $fut_life>>;
+            type IntoFuture = ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Self::Output> + Send $(+ $fut_life)?>>;
 
             fn into_future(self) -> Self::IntoFuture {
                 Box::pin(self.$func())
@@ -1003,119 +1003,6 @@ macro_rules! FieldsTrait {
             }
         }
     }
-}
-
-/// Implements `Deserialize` for a struct where one field can have several different names.
-///
-/// For example, a JSON object might contain either a `"text"` field or a `"body"` field,
-/// but they should both map to the same struct field.
-///
-/// This macro generates a custom `Visitor` and deserializes into a helper struct
-/// before mapping the fields to the final struct.
-macro_rules! AnyField {
-    {
-        |Cont_Attr|: $($cont_attr:meta)*,
-        |Name|: $name:ident,
-        $(
-            |Lives|: $($life:lifetime)*,
-            |Generics|: $($generic:ident)*,
-        )?
-        // The first field is the special "any" field.
-        |Field_Vis|: $any_field_vis:vis,
-        |Field_Attr|: anyfield($($any_field:literal),*) $($any_field_attr:meta)*,
-        |Field_Name|: $any_field_ident:ident,
-        |Field_Type|: $any_field_ty:ty,
-        // The rest of the fields are standard.
-        $(
-            |Field_Vis|: $field_vis:vis,
-            |Field_Attr|: $($field_attr:meta)*,
-            |Field_Name|: $field:ident,
-            |Field_Type|: $ty:ty,
-        )*
-    } => {
-        paste::paste! {
-            // Implement `Deserialize` for the user's struct.
-            impl<'a> serde::Deserialize<'a> for $name {
-                #[inline]
-                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                    where
-                        D: serde::Deserializer<'a> {
-                    // Step 1: Deserialize into the intermediate helper struct.
-                    let helper = [<__AnyFieldHelperFor $name>]::deserialize(deserializer)?;
-                    // SAFETY: These are literally thesame structs under different names so they'll always
-                    // have thesame layout
-                    Ok(unsafe { std::mem::transmute::<[<__AnyFieldHelperFor $name>], $name>(helper) })
-                }
-            }
-
-            // A private helper struct used for the intermediate deserialization.
-            // Its layout matches the target struct, which is why `transmute` is safe.
-            #[derive(serde::Deserialize)]
-            // Pass through any container attributes (#[repr(whatever)] happens to the twin too)
-            $(#[$cont_attr])*
-            #[doc(hidden)]
-            #[allow(dead_code)]
-            pub(crate) struct [<__AnyFieldHelperFor $name>]$(<$($life),* $($generic),*>)? {
-                // The "any" field is flattened from a special newtype.
-                #[serde(flatten)]
-                $(#[$any_field_attr])*
-                $any_field_ident: [<__AnyFieldPayloadFor $name>],
-                // The rest of the fields are deserialized normally.
-                $(
-                    $(#[$field_attr])*
-                    $field: $ty,
-                )*
-            }
-
-            // We could use enum but we want to make the helper the same size
-            // as the main so we could transmute...
-            #[allow(dead_code)]
-            struct [<__AnyFieldPayloadFor $name>]($any_field_ty);
-
-            // Custom `Deserialize` for the newtype to implement the "any field" logic.
-            impl<'a> serde::Deserialize<'a> for [<__AnyFieldPayloadFor $name>] {
-                #[inline]
-                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                    where
-                        D: serde::Deserializer<'a> {
-                    deserializer.deserialize_map([<__AnyFieldVisitorFor $name>])
-                }
-            }
-
-            // A Serde visitor to find one of the allowed field names.
-            #[doc(hidden)]
-            struct [<__AnyFieldVisitorFor $name>];
-
-            impl<'de> serde::de::Visitor<'de> for [<__AnyFieldVisitorFor $name>]  {
-                type Value = [<__AnyFieldPayloadFor $name>];
-
-                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    write!(formatter, "struct {} with any of the fields: {:#?}.",
-                           stringify!([<__AnyFieldPayloadFor $name>]),
-                           [$($any_field),*])
-                }
-
-                #[inline]
-                fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-                    where
-                        A: serde::de::MapAccess<'de>, {
-                    #[derive(serde::Deserialize)]
-                    #[allow(non_camel_case_types)]
-                    enum Field {
-                        $(
-                            [<$any_field>],
-                        )*
-                    }
-
-                    // Find the first key-value pair that matches one of our expected fields.
-                    let (_, v): (Field, $any_field_ty) = map.next_entry()?.ok_or_else(|| {
-                        <A::Error as serde::de::Error>::custom(format!("missing one of the fields: {:#?}", [$($any_field),*]))
-                    })?;
-                    Ok([<__AnyFieldPayloadFor $name>](v))
-                }
-            }
-        }
-    };
 }
 
 /// Implements a builder pattern for a struct through Update.
@@ -2283,38 +2170,6 @@ mod tests {
     use crate::MetaError;
 
     use super::*;
-
-    #[test]
-    fn any_field() {
-        derive! {
-            #[derive(#AnyField)]
-            #[allow(dead_code)]
-            struct S {
-                #![anyfield("field", "field_id", "another_field")]
-                field: String,
-                #![serde(default)]
-                actual_field: Option<usize>,
-            }
-        }
-
-        let jstrs = [
-            r#"{
-                "field": "1",
-                "actual_field": 6
-            }"#,
-            r#"{
-                "actual_field": 200,
-                "field_id": "2"
-            }"#,
-            r#"{
-                "another_field": "3"
-            }"#,
-        ];
-
-        for jstr in jstrs {
-            serde_json::from_str::<S>(jstr).unwrap();
-        }
-    }
 
     #[test]
     fn de_adjacent() {

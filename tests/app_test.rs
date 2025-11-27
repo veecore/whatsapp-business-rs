@@ -1,11 +1,15 @@
 mod common;
 
+#[cfg(feature = "test-mode")]
 use common::*;
+#[cfg(feature = "test-mode")]
 use serde_json::json;
+#[cfg(feature = "test-mode")]
 use whatsapp_business_rs::{
     Business, Client, Fields,
     app::{SubscriptionField, WebhookConfig},
 };
+#[cfg(feature = "test-mode")]
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{bearer_token, body_json, method, path, query_param},
@@ -89,6 +93,7 @@ setup! {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_configure_webhook_success() {
     let mock_server = MockServer::start().await;
     // Arrange

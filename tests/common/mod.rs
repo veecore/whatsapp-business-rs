@@ -41,6 +41,7 @@ macro_rules! setup {
         $async:ident $fn:ident $name:ident($server:ident: _) $body:block
     ) => {
         #[test]
+        #[cfg(feature = "test-mode")]
         $fn $name() {
             let mock_server = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

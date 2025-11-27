@@ -1,18 +1,24 @@
 mod common;
 
+#[cfg(feature = "test-mode")]
 use common::*;
+#[cfg(feature = "test-mode")]
 use futures::TryStreamExt;
+#[cfg(feature = "test-mode")]
 use serde_json::json;
+#[cfg(feature = "test-mode")]
 use whatsapp_business_rs::{
     Client,
     waba::{PhoneNumberMetadataField, UnverifiedPhoneNumber, VerificationMethod},
 };
+#[cfg(feature = "test-mode")]
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{bearer_token, body_json, method, path, query_param, query_param_contains},
 };
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_list_phone_numbers() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -55,6 +61,7 @@ async fn test_list_phone_numbers() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_list_catalogs() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -95,6 +102,7 @@ async fn test_list_catalogs() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_list_subscribed_apps() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -140,6 +148,7 @@ async fn test_list_subscribed_apps() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_list_flows() {
     let mock_server = MockServer::start().await;
     // Arrange

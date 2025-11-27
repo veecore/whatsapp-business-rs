@@ -1017,6 +1017,37 @@ impl SendMessage<'_> {
         self.request = self.request.auth(auth);
         self
     }
+
+    /// Converts this borrowed `SendMessage` into an owned `SendMessage<'static>`.
+    ///
+    /// # Why use this?
+    /// When you reply to an incoming webhook message, the `SendMessage` typically
+    /// borrows data (like the message ID) from that incoming message.
+    /// This results in a `SendMessage` with a lifetime tied to the webhook payload.
+    ///
+    /// However, if you want to spawn the sending process into a background task
+    /// (e.g., using `tokio::spawn`) the compiler will reject the code because the
+    /// task outlives the borrowed data.
+    ///
+    /// `into_static` clones all necessary underlying data (payloads, tokens, IDs),
+    /// detaching it from the original lifetime so it can be moved into `'static` contexts.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// // Without into_static, this fails because `incoming_message` is borrowed
+    /// // tokio::spawn(async { incoming_message.reply("Hi").await });
+    ///
+    /// // With into_static, it works:
+    /// let send_job = incoming_message.reply("Hi").into_static();
+    /// tokio::spawn(send_job.into_future());
+    /// ```
+    #[inline]
+    pub fn into_static(self) -> SendMessage<'static> {
+        SendMessage {
+            body: self.body.into_static(),
+            request: self.request,
+        }
+    }
 }
 
 IntoFuture! {

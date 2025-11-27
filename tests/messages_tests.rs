@@ -1,7 +1,10 @@
 mod common;
 
+#[cfg(feature = "test-mode")]
 use common::*;
+#[cfg(feature = "test-mode")]
 use serde_json::json;
+#[cfg(feature = "test-mode")]
 use whatsapp_business_rs::{
     Client, IdentityRef,
     catalog::ProductRef,
@@ -10,12 +13,14 @@ use whatsapp_business_rs::{
         Section,
     },
 };
+#[cfg(feature = "test-mode")]
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{bearer_token, body_json, body_string_contains, method, path},
 };
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_send_media_message() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -80,6 +85,7 @@ async fn test_send_media_message() {
 
 /// Tests sending a media message (e.g., image) using its pre-uploaded ID.
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_send_media_message_by_id() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -125,6 +131,7 @@ async fn test_send_media_message_by_id() {
 
 /// Tests sending a basic text message.
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_send_text_message() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -174,6 +181,7 @@ async fn test_send_text_message() {
 
 /// Tests sending an emoji reaction to a specific message.
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_send_reaction_message() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -220,6 +228,7 @@ async fn test_send_reaction_message() {
 
 /// Tests sending a location message with coordinates, name, and address.
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_send_location_message() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -269,6 +278,7 @@ async fn test_send_location_message() {
 
 /// Tests sending an interactive message with reply buttons.
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_send_interactive_message_with_buttons() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -329,6 +339,7 @@ async fn test_send_interactive_message_with_buttons() {
 
 /// Tests sending an interactive message with a list of options.
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_send_interactive_message_with_list() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -400,6 +411,7 @@ async fn test_send_interactive_message_with_list() {
 
 /// Tests sending an interactive message with a list of products from a catalog.
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_send_interactive_message_with_product_list() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -473,6 +485,7 @@ async fn test_send_interactive_message_with_product_list() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_mark_message_as_read() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -511,6 +524,7 @@ async fn test_mark_message_as_read() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_set_typing() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -552,6 +566,7 @@ async fn test_set_typing() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_upload_media_success() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -587,6 +602,7 @@ async fn test_upload_media_success() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_delete_media_success() {
     let mock_server = MockServer::start().await;
     // Arrange

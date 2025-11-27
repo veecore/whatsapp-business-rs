@@ -440,7 +440,7 @@ IntoFuture! {
 impl<H> BatchExecute<H>
 [
 where
-    H: Handler + Send + 'static,
+    H: Handler + Send,
     ]
 {
     /// Sends the batch request and returns a `BatchOutput`.
@@ -448,7 +448,7 @@ where
     /// This method performs the network operation and a preliminary parsing of the
     /// top-level batch response JSON. The returned `BatchOutput` can then be used
     /// to parse the individual results using `.flatten()`.
-    pub fn execute(self) -> impl Future<Output = Result<BatchOutput<H>, crate::Error>> + 'static {
+    pub fn execute(self) -> impl Future<Output = Result<BatchOutput<H>, crate::Error>> {
         #[cfg(debug_assertions)]
         let handle = async |endpoint: String, response| {
             Client::handle_response(response, endpoint.into()).await
@@ -571,6 +571,7 @@ pub trait Requests {
     ///
     /// This is used for pre-allocating capacity to improve performance.
     #[inline]
+    #[doc(hidden)]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (1, None)
     }
@@ -1105,7 +1106,7 @@ pub(crate) mod trait_impls {
         }
 
         fn size_hint(&self) -> (usize, Option<usize>) {
-            (0, None)
+            (0, Some(0))
         }
     }
 
@@ -2430,7 +2431,7 @@ mod tests {
 
     use crate::{
         app::SubscriptionField,
-        client::{ChainQuery, FieldsQuery, TupleArrayShorthand},
+        client::{ChainQuery, ClientBuilder, FieldsQuery, TupleArrayShorthand},
         waba::PhoneNumberMetadataField,
     };
 
@@ -2785,6 +2786,22 @@ mod tests {
         assert_is_requests::<super::Many<<Vec<SomeRequest> as IntoIterator>::IntoIter>>();
         assert_is_requests::<super::Then<SomeRequest, SomeRequest, fn(()) -> SomeRequest>>();
         assert_is_requests::<super::Map<SomeRequest, fn(()) -> i32>>();
+    }
+
+    #[test]
+    fn test_static_handle_regression() {
+        let client = ClientBuilder::new().build().unwrap();
+        // Data to be referenced accross handle to make it not static
+        let data = String::new();
+
+        // Now handler is not 'static
+        let request = client
+            .message("Wo")
+            .send("Ni", "Ni hao!")
+            .map(|_response| &data);
+
+        // Check if the bounds to implement IntoFuture still holds
+        let _fut = client.batch().include(request).execute().into_future();
     }
 
     #[test]

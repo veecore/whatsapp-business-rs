@@ -1,6 +1,6 @@
 [package]
 name = "whatsapp-business-rs"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 authors = ["Victor <victorayo206@example.com>"]
 description = "Rust SDK for the WhatsApp Business API — bulk messaging, batching, and multi-tenant support."
@@ -42,7 +42,7 @@ http = {version = "1.3.1", default-features = false, optional = true}
 
 [features]
 default = ["batch", "server", "media_ext", "byos"]
-incoming_message_ext = []
+incoming_message_ext = ["server"]
 batch = ["serde-metaform"]
 server = ["axum", "hmac", "sha2", "hex", "subtle"]
 media_ext = ["infer"]

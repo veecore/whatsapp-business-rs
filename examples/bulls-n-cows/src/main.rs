@@ -12,6 +12,8 @@
 
 // The helpers module contains UI logic: message text, button definitions,
 // and parsers for user input. This keeps the main state machine logic clean.
+#[cfg(feature = "batch_server")]
+mod batch_server;
 mod helpers;
 
 use dashmap::DashMap; // A thread-safe, high-performance HashMap. Perfect for storing per-user game rooms.
@@ -43,6 +45,7 @@ pub struct Config {
     app_secret: String,
     server_verify_token: String,
     server_url: String,
+    super_user: String,
 }
 
 impl Config {
@@ -61,6 +64,8 @@ impl Config {
                 .map_err(|_| "Please set the `SERVER_VERIFY_TOKEN` env-var")?,
             server_url: env::var("SERVER_URL")
                 .map_err(|_| "Please set the `SERVER_URL` env-var")?,
+            super_user: env::var("SUPER_USER")
+                .map_err(|_| "Please set the `SUPER_USER` env-var")?,
         })
     }
 }
@@ -70,7 +75,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loading config....");
     let config = Config::load()?;
 
-    // 1. Build the webhook server. This is what receives messages from Meta.
+    // 1. Create the client, which is used to *send* messages.
+    let client = Client::new(config.access_token.clone()).await.unwrap();
+
+    {
+        let token = client.app(config.app_id).update_token(config.access_token, config.app_secret).await?;
+        println!("{token}")
+    }
+
+todo!();
+    // 2. Build the webhook server. This is what receives messages from Meta.
     let server = Server::builder()
         .endpoint(format!("127.0.0.1:{}", config.port).parse().unwrap())
         // Use the App Secret to verify payloads, ensuring they come from Meta.
@@ -78,10 +92,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .verify_payload(config.app_secret.clone())
         .build();
 
-    // 2. Create our App instance, which holds the game state.
-    let app = App::new();
-    // 3. Create the client, which is used to *send* messages.
-    let client = Client::new(config.access_token).await.unwrap();
+    // 3. Create our App instance, which holds the game state.
+    #[cfg(feature = "batch_server")]
+    let mut app = App::new(client.clone());
+
+    #[cfg(not(feature = "batch_server"))]
+    let mut app = App::new();
+
+    #[cfg(feature = "sudo")]
+    {
+        app.super_user = config.super_user.into();
+    }
 
     println!("Server starting....");
     // 4. Start the server.
@@ -103,33 +124,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// The main application struct.
 /// It holds the state for all ongoing games in a thread-safe manner.
-#[derive(Default)]
+#[cfg_attr(not(feature = "batch_server"), derive(Default))]
 pub struct App {
     /// `Rooms` is a thread-safe map (using DashMap) that stores a `Room` (game state)
     /// for each user, keyed by their phone ID.    
     rooms: Rooms,
+    #[cfg(feature = "batch_server")]
+    batch_client: batch_server::BatchClient,
+    #[cfg(feature = "sudo")]
+    super_user: Box<str>,
 }
 
 impl App {
     /// Creates a new App instance.
+    #[cfg(not(feature = "batch_server"))]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a new App instance.
+    #[cfg(feature = "batch_server")]
+    pub fn new(client: Client) -> Self {
+        let (batch_client, batch_server) = batch_server::new_batch_server();
+        batch_server.spawn(client);
+        Self {
+            rooms: Rooms::default(),
+            batch_client,
+            #[cfg(feature = "sudo")]
+            // God forgive me
+            super_user: "".into() 
+        }
     }
 
     /// Retrieves the game room for a given user, creating a new one if it doesn't exist.
     /// This is the core of our per-user state management.
     #[inline]
-    pub fn get_or_start_room<'a>(&'a self, room_id: RoomId) -> impl DerefMut<Target = Room> + 'a {
+    fn get_or_start_room<'a>(&'a self, room_id: RoomId) -> impl DerefMut<Target = Room> + 'a {
         // `DashMap::entry().or_default()` is an atomic operation.
         // It gets a mutable reference to the user's room, or inserts a new
         // `Room::default()` if one doesn't exist, and returns the reference.
         // This prevents race conditions and is very efficient.
         self.rooms.0.entry(room_id.0.into()).or_default()
     }
+
+    #[inline]
+    #[cfg(feature = "batch_server")]
+    fn start_chat(&self, msg: IncomingMessage) -> Chat {
+        Chat::new(msg, self.batch_client.clone())
+    }
+
+    #[cfg(feature = "sudo")]
+    #[inline(never)]
+    async fn handle_sudo(&self, msg: &Chat, action: SudoAction) {
+        match action {
+            SudoAction::Help => SudoAction::send_help(&msg).await,
+            SudoAction::CountRooms { filter } => {
+                let count = match filter {
+                    CountRoomFilter::InGame => self
+                        .rooms
+                        .0
+                        .iter()
+                        .filter(|room| matches!(room.state, RoomState::Game(..)))
+                        .count(),
+                    CountRoomFilter::JustStarting => self
+                        .rooms
+                        .0
+                        .iter()
+                        .filter(|room| matches!(room.state, RoomState::Start))
+                        .count(),
+                    CountRoomFilter::Ended => self
+                        .rooms
+                        .0
+                        .iter()
+                        .filter(|room| matches!(room.state, RoomState::End(..)))
+                        .count(),
+                    CountRoomFilter::All => self.rooms.0.len(),
+                };
+                SudoAction::send_count(msg, count).await
+            }
+        }
+    }
 }
 
 /// A unique identifier for a game room, typically the user's phone ID.
 /// This is a "newtype" wrapper for `&str` to provide type safety.
+#[derive(Clone, Copy)]
 pub struct RoomId<'a>(pub &'a str);
 
 /// A thread-safe collection of all active game rooms.
@@ -155,6 +234,19 @@ impl WebhookHandler for App {
         // Get or create the user's specific game room.
         // `room` is a mutable guard to the `Room` value in the DashMap.
         let mut room = self.get_or_start_room(room_id);
+
+        #[cfg(feature = "batch_server")]
+        let msg = self.start_chat(msg);
+
+        #[cfg(feature = "sudo")]
+        if *msg.sender.phone_id == *self.super_user {
+            if let Some(sudo) = SudoAction::parse(&msg) {
+                drop(room); // to avoid deadlock
+                self.handle_sudo(&msg, sudo).await;
+                return;
+            }
+            // fallthrough
+        }
 
         // --- IMGUI-style Update ---
         // Delegate all logic to the room's `update` method.
@@ -213,7 +305,7 @@ impl Room {
     ///
     /// This is like a UI "render loop" that runs for every "input event" (message).
     #[inline]
-    async fn update(&mut self, msg: IncomingMessage) {
+    async fn update(&mut self, msg: Chat) {
         // Delegate to the current state's update logic.
         let new_state = match &mut self.state {
             RoomState::Start => Self::update_start(msg).await,
@@ -230,7 +322,7 @@ impl Room {
     /// Creates a new room in the `Start` state and sends the welcome message.
     /// This is a helper for transitioning *back* to the main menu.
     #[inline]
-    async fn start(msg: &IncomingMessage) -> RoomState {
+    async fn start(msg: &Chat) -> RoomState {
         StartAction::send_hello(msg).await; // Send the main menu message.
         RoomState::Start // Return the new state.
     }
@@ -238,7 +330,7 @@ impl Room {
     /// Handles user input when the room is in the `Start` state.
     /// Returns `Some(RoomState)` to transition, or `None` to stay in `Start`.    
     #[inline]
-    async fn update_start(msg: IncomingMessage) -> Option<RoomState> {
+    async fn update_start(msg: Chat) -> Option<RoomState> {
         // `StartAction::parse` (from `helpers.rs`) figures out what the user wants.
         match StartAction::parse(&msg) {
             // User wants to start a game.
@@ -286,7 +378,7 @@ pub struct End {
 impl End {
     /// Transitions to the `End` state from a completed game.
     #[inline]
-    async fn start(msg: &IncomingMessage, game: GameModeRef) -> RoomState {
+    async fn start(msg: &Chat, game: GameModeRef) -> RoomState {
         // The specific win/loss message has already been sent by the game mode.
         // This function sends the follow-up actions like "Play Again" or "Main Menu".
         EndAction::send_end_prompt(msg, game).await;
@@ -298,11 +390,7 @@ impl End {
 
     /// A special transition for when the *human* wins, storing their win message.
     #[inline]
-    async fn with_win_msg(
-        msg: &IncomingMessage,
-        game: GameModeRef,
-        win_msg: impl Display,
-    ) -> RoomState {
+    async fn with_win_msg(msg: &Chat, game: GameModeRef, win_msg: impl Display) -> RoomState {
         EndAction::send_end_prompt_suggest_win(msg, game).await; // Send "Play Again" + "Share Win"
         RoomState::End(Self {
             last: game,
@@ -312,7 +400,7 @@ impl End {
 
     /// Handles user input when in the `End` state (e.g., play again, main menu).
     #[inline]
-    async fn update(&mut self, msg: IncomingMessage) -> Option<RoomState> {
+    async fn update(&mut self, msg: Chat) -> Option<RoomState> {
         match EndAction::parse(&msg) {
             // User wants to go to the main menu.
             EndAction::MainMenu => {
@@ -355,7 +443,7 @@ pub enum GameMode {
 impl GameModeRef {
     /// Factory method to create the starting `RoomState` for a new game.
     #[inline]
-    async fn start(self, msg: &IncomingMessage) -> RoomState {
+    async fn start(self, msg: &Chat) -> RoomState {
         match self {
             GameModeRef::BvB => BotVsBot::start(msg).await,
             GameModeRef::HvB => HumanVsBot::start(msg).await,
@@ -369,7 +457,7 @@ impl GameMode {
     /// This handles generic commands (like "restart") *before* delegating
     /// to the specific game mode's logic.    
     #[inline]
-    async fn update(&mut self, msg: IncomingMessage) -> Option<RoomState> {
+    async fn update(&mut self, msg: Chat) -> Option<RoomState> {
         // First, try to parse a generic command applicable to any game mode.
         if let Some(command) = GameRoomAction::parse(&msg) {
             match command {
@@ -397,7 +485,7 @@ impl GameMode {
 
     /// Restarts the current game mode.
     #[inline]
-    async fn restart(&mut self, msg: &IncomingMessage) -> RoomState {
+    async fn restart(&mut self, msg: &Chat) -> RoomState {
         match self {
             GameMode::BvB(_) => BotVsBot::start(msg).await,
             GameMode::HvB(_) => HumanVsBot::start(msg).await,
@@ -407,7 +495,7 @@ impl GameMode {
 
     /// Sends a help message specific to the current game mode.
     #[inline]
-    async fn help(&mut self, msg: &IncomingMessage) {
+    async fn help(&mut self, msg: &Chat) {
         match self {
             GameMode::BvB(_) => BotVsBot::help(msg).await,
             GameMode::HvB(_) => HumanVsBot::help(msg).await,
@@ -426,7 +514,7 @@ pub struct BotVsBot {
 impl BotVsBot {
     /// Starts a new BvB game.
     #[inline]
-    async fn start(msg: &IncomingMessage) -> RoomState {
+    async fn start(msg: &Chat) -> RoomState {
         let mut me = Self {
             bot_a: (Calls::default(), Password::random()),
             bot_b: (Calls::default(), Password::random()),
@@ -443,14 +531,14 @@ impl BotVsBot {
     }
 
     #[inline]
-    async fn help(msg: &IncomingMessage) {
+    async fn help(msg: &Chat) {
         BvbAction::send_help(msg).await
     }
 
     /// Handles user input *during* a BvB game.
     /// The only valid input is "Next" or a generic command.
     #[inline]
-    async fn update(&mut self, msg: IncomingMessage) -> Option<RoomState> {
+    async fn update(&mut self, msg: Chat) -> Option<RoomState> {
         match BvbAction::parse(&msg) {
             // User clicked "Next" to see the next turn.
             BvbAction::Next => self.advance(&msg).await,
@@ -464,7 +552,7 @@ impl BotVsBot {
     /// Advances the game by one turn for each bot.
     /// Returns `Some(RoomState::End)` if the game is over.
     #[inline]
-    async fn advance(&mut self, msg: &IncomingMessage) -> Option<RoomState> {
+    async fn advance(&mut self, msg: &Chat) -> Option<RoomState> {
         // --- Bot A's turn ---
         let a_call = self
             .bot_a
@@ -504,7 +592,7 @@ impl BotVsBot {
 
     /// Helper to transition to the `End` state.
     #[inline]
-    async fn end(&self, msg: &IncomingMessage) -> RoomState {
+    async fn end(&self, msg: &Chat) -> RoomState {
         End::start(msg, GameModeRef::BvB).await
     }
 }
@@ -524,7 +612,7 @@ pub struct HumanVsBot {
 impl HumanVsBot {
     /// Starts a new HvB game.
     #[inline]
-    async fn start(msg: &IncomingMessage) -> RoomState {
+    async fn start(msg: &Chat) -> RoomState {
         let me = Self {
             bot: (Calls::new(), Password::random()),
             last_bot_call: None, // Human goes first.
@@ -535,13 +623,13 @@ impl HumanVsBot {
     }
 
     #[inline]
-    async fn help(msg: &IncomingMessage) {
+    async fn help(msg: &Chat) {
         HvbAction::send_help(msg).await;
     }
 
     /// The core logic loop for the Human vs Bot game.
     #[inline]
-    async fn update(&mut self, msg: IncomingMessage) -> Option<RoomState> {
+    async fn update(&mut self, msg: Chat) -> Option<RoomState> {
         // `HvbAction::parse` is smart. It can detect:
         // - "1234" (a Call)
         // - "1b 2c" (a Grade)
@@ -569,11 +657,7 @@ impl HumanVsBot {
 
     /// Handles the case where the user *only* provides a grade for the bot's last call.
     #[inline]
-    async fn handle_grade(
-        &mut self,
-        msg: &IncomingMessage,
-        grade: GradeAction,
-    ) -> Option<RoomState> {
+    async fn handle_grade(&mut self, msg: &Chat, grade: GradeAction) -> Option<RoomState> {
         let bot_grade = grade.grade;
 
         // --- 1. Process the Grade for the bot's last call ---
@@ -596,7 +680,7 @@ impl HumanVsBot {
     #[inline]
     async fn try_settle_grade(
         &mut self,
-        msg: &IncomingMessage,
+        msg: &Chat,
         grade: GradeAction,
     ) -> Result<(), Option<RoomState>> {
         // If the user set a password, they shouldn't be grading manually.
@@ -638,7 +722,7 @@ impl HumanVsBot {
 
     /// Handles the case where the user *only* makes a new call.
     #[inline]
-    async fn handle_call(&mut self, msg: &IncomingMessage, call: Call) -> Option<RoomState> {
+    async fn handle_call(&mut self, msg: &Chat, call: Call) -> Option<RoomState> {
         // --- 1. Check if it's the user's turn to make a call ---
         if let Some(last_call) = self.last_bot_call {
             // It's not the user's turn. They must grade the bot's last call first.
@@ -716,7 +800,7 @@ impl HumanVsBot {
     #[inline]
     async fn handle_both(
         &mut self,
-        msg: &IncomingMessage,
+        msg: &Chat,
         grade: GradeAction,
         call: Call,
     ) -> Option<RoomState> {
@@ -734,13 +818,13 @@ impl HumanVsBot {
 
     /// Helper to transition to the `End` state (bot win or discrepancy).
     #[inline]
-    async fn end(&self, msg: &IncomingMessage) -> RoomState {
+    async fn end(&self, msg: &Chat) -> RoomState {
         End::start(msg, GameModeRef::HvB).await
     }
 
     /// Helper to transition to the `End` state (human win).
     #[inline]
-    async fn end_human_wins(&self, msg: &IncomingMessage) -> RoomState {
+    async fn end_human_wins(&self, msg: &Chat) -> RoomState {
         // Create a shareable win message.
         End::with_win_msg(
             msg,
@@ -761,7 +845,7 @@ pub struct AssistMode {
 impl AssistMode {
     /// Starts a new Assist Mode game.
     #[inline]
-    async fn start(msg: &IncomingMessage) -> RoomState {
+    async fn start(msg: &Chat) -> RoomState {
         let mut assists = Calls::new();
         // The first guess is always a good starting point (e.g., "1234" or "1203").
         let first_call = assists
@@ -777,14 +861,14 @@ impl AssistMode {
     }
 
     #[inline]
-    async fn help(msg: &IncomingMessage) {
+    async fn help(msg: &Chat) {
         AssistAction::send_help(msg).await;
     }
 
     /// Handles user input in Assist Mode.
     /// The only expected input is a grade (e.g., "1b 2c").
     #[inline]
-    async fn update(&mut self, msg: IncomingMessage) -> Option<RoomState> {
+    async fn update(&mut self, msg: Chat) -> Option<RoomState> {
         match AssistAction::parse(&msg) {
             // User sent a grade for the bot's last suggestion.
             AssistAction::Grade(guess_result) => {
@@ -820,13 +904,13 @@ impl AssistMode {
 
     /// Helper to transition to the `End` state (discrepancy).
     #[inline]
-    async fn end(&self, msg: &IncomingMessage) -> RoomState {
+    async fn end(&self, msg: &Chat) -> RoomState {
         End::start(msg, GameModeRef::Assist).await
     }
 
     /// Helper to transition to the `End` state (human win).
     #[inline]
-    async fn end_human_wins(&self, msg: &IncomingMessage) -> RoomState {
+    async fn end_human_wins(&self, msg: &Chat) -> RoomState {
         End::with_win_msg(
             msg,
             GameModeRef::Assist,
@@ -841,6 +925,9 @@ impl AssistMode {
 // and asserts that the `Room`'s state transitions correctly.
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "batch_server")]
+    use std::sync::LazyLock;
+
     use super::*;
     use call_n_said::GuessResult;
     use whatsapp_business_rs::{
@@ -848,6 +935,19 @@ mod tests {
         message::{Button, Content, Context, InteractiveContent, MessageStatus},
         server::IncomingMessage,
     };
+
+    #[cfg(feature = "batch_server")]
+    const APP: LazyLock<App> = LazyLock::new(|| {
+        let client = Client::builder().build().unwrap();
+        App::new(client.clone())
+    });
+
+    #[cfg(feature = "batch_server")]
+    impl From<IncomingMessage> for Chat {
+        fn from(value: IncomingMessage) -> Self {
+            APP.start_chat(value)
+        }
+    }
 
     // A test helper to create a mock `IncomingMessage`.
     // This is complex due to the private fields in the original struct,
@@ -909,11 +1009,11 @@ mod tests {
         assert!(matches!(room.state, RoomState::Start));
 
         // Test "Hi" -> should remain in Start
-        room.update(mock_text_message("Hi")).await;
+        room.update(mock_text_message("Hi").into()).await;
         assert!(matches!(room.state, RoomState::Start), "Failed on 'Hi'");
 
         // Test "Learn More" -> should remain in Start
-        room.update(mock_text_message("Learn More about the game"))
+        room.update(mock_text_message("Learn More about the game").into())
             .await;
         assert!(
             matches!(room.state, RoomState::Start),
@@ -921,7 +1021,7 @@ mod tests {
         );
 
         // Test Invalid command -> should remain in Start
-        room.update(mock_text_message("some random gibberish"))
+        room.update(mock_text_message("some random gibberish").into())
             .await;
         assert!(
             matches!(room.state, RoomState::Start),
@@ -934,17 +1034,19 @@ mod tests {
         let mut room = Room::new();
 
         // Test transition to HumanVsBot
-        room.update(mock_button_message(START_HVB_CALLBACK)).await;
+        room.update(mock_button_message(START_HVB_CALLBACK).into())
+            .await;
         assert!(matches!(room.state, RoomState::Game(GameMode::HvB(_))));
 
         // Reset and test transition to BotVsBot
         // First, go back to main menu
-        room.update(mock_button_message(GAME_ROOM_MAINMENU_CALLBACK))
+        room.update(mock_button_message(GAME_ROOM_MAINMENU_CALLBACK).into())
             .await;
         assert!(matches!(room.state, RoomState::Start));
 
         // Then start BvB
-        room.update(mock_button_message(START_BVB_CALLBACK)).await;
+        room.update(mock_button_message(START_BVB_CALLBACK).into())
+            .await;
         // BvB immediately advances, so it can
         // either be in Game or End state (if it won on the first turn).
         let is_bvb_or_end = matches!(&room.state, RoomState::Game(GameMode::BvB(_)))
@@ -953,7 +1055,7 @@ mod tests {
 
         // Reset and test transition to Assist Mode
         room.state = RoomState::Start;
-        room.update(mock_button_message(START_ASSIST_CALLBACK))
+        room.update(mock_button_message(START_ASSIST_CALLBACK).into())
             .await;
         assert!(matches!(room.state, RoomState::Game(GameMode::Assist(_))));
     }
@@ -963,10 +1065,11 @@ mod tests {
         let mut room = Room::new();
 
         // 1. Start HvB game
-        room.update(mock_button_message(START_HVB_CALLBACK)).await;
+        room.update(mock_button_message(START_HVB_CALLBACK).into())
+            .await;
 
         // 2. Make first call.
-        room.update(mock_text_message("1234")).await;
+        room.update(mock_text_message("1234").into()).await;
         let bot_call = if let RoomState::Game(GameMode::HvB(state)) = &mut room.state {
             assert!(state.human_password.is_none());
             // After the human calls, the bot should make a call and wait for a grade.
@@ -977,7 +1080,7 @@ mod tests {
         };
 
         // 3. Try to make another call without grading (should be ignored)
-        room.update(mock_text_message("5678")).await;
+        room.update(mock_text_message("5678").into()).await;
         if let RoomState::Game(GameMode::HvB(state)) = &room.state {
             // State should be unchanged, bot call is still waiting for a grade
             assert_eq!(state.last_bot_call, Some(bot_call));
@@ -986,7 +1089,7 @@ mod tests {
         }
 
         // 4. Grade the bot's call
-        room.update(mock_text_message("1b 2c")).await;
+        room.update(mock_text_message("1b 2c").into()).await;
         if let RoomState::Game(GameMode::HvB(state)) = &room.state {
             // Bot's call is now graded, so `last_bot_call` should be None
             // (it's the human's turn to call).
@@ -1010,7 +1113,7 @@ mod tests {
             last_bot_call: None,
             human_password: None,
         }));
-        room.update(mock_text_message("1234")).await; // Winning call
+        room.update(mock_text_message("1234").into()).await; // Winning call
         // Should transition to End
         assert!(matches!(room.state, RoomState::End(_)));
         if let RoomState::End(end_state) = room.state {
@@ -1029,7 +1132,7 @@ mod tests {
             last_bot_call: Some(parse_guess("1234").unwrap()),
             human_password: None,
         }));
-        room.update(mock_text_message("4b 0c")).await; // Winning grade
+        room.update(mock_text_message("4b 0c").into()).await; // Winning grade
         // Should transition to End
         assert!(matches!(room.state, RoomState::End(_)));
         if let RoomState::End(end_state) = room.state {
@@ -1044,10 +1147,11 @@ mod tests {
     #[tokio::test]
     async fn test_hvb_with_set_password() {
         let mut room = Room::new();
-        room.update(mock_button_message(START_HVB_CALLBACK)).await;
+        room.update(mock_button_message(START_HVB_CALLBACK).into())
+            .await;
 
         // 1. Set password
-        room.update(mock_text_message("set 5678")).await;
+        room.update(mock_text_message("set 5678").into()).await;
         if let RoomState::Game(GameMode::HvB(state)) = &room.state {
             assert_eq!(state.human_password, Some(parse_guess("5678").unwrap()));
             assert!(state.last_bot_call.is_none());
@@ -1056,7 +1160,7 @@ mod tests {
         }
 
         // 2. Make a call. Bot should grade itself and not require user input.
-        room.update(mock_text_message("1234")).await;
+        room.update(mock_text_message("1234").into()).await;
         // The game should either continue (if no winner) or end (if bot won).
         if let RoomState::Game(GameMode::HvB(state)) = &room.state {
             // The bot should have made a call and immediately graded it,
@@ -1073,13 +1177,14 @@ mod tests {
     #[tokio::test]
     async fn test_generic_game_commands() {
         let mut room = Room::new();
-        room.update(mock_button_message(START_HVB_CALLBACK)).await;
+        room.update(mock_button_message(START_HVB_CALLBACK).into())
+            .await;
 
         // Make a move to ensure there's state to reset
-        room.update(mock_text_message("1234")).await;
+        room.update(mock_text_message("1234").into()).await;
 
         // Restart should reset the game, but stay in HvB
-        room.update(mock_text_message("restart")).await;
+        room.update(mock_text_message("restart").into()).await;
         assert!(matches!(&room.state, RoomState::Game(GameMode::HvB(_))));
         if let RoomState::Game(GameMode::HvB(hvb)) = &room.state {
             // Check if it's a fresh game
@@ -1090,14 +1195,14 @@ mod tests {
         }
 
         // Main Menu should go back to Start
-        room.update(mock_text_message("main menu")).await;
+        room.update(mock_text_message("main menu").into()).await;
         assert!(matches!(room.state, RoomState::Start));
     }
 
     #[tokio::test]
     async fn test_assist_mode_flow() {
         let mut room = Room::new();
-        room.update(mock_button_message(START_ASSIST_CALLBACK))
+        room.update(mock_button_message(START_ASSIST_CALLBACK).into())
             .await;
 
         let last_call = if let RoomState::Game(GameMode::Assist(assist)) = &room.state {
@@ -1108,7 +1213,7 @@ mod tests {
         };
 
         // Grade the first suggestion
-        room.update(mock_text_message("1b 0c")).await;
+        room.update(mock_text_message("1b 0c").into()).await;
 
         // Check that the state was updated
         if let RoomState::Game(GameMode::Assist(assist)) = &room.state {
@@ -1123,7 +1228,7 @@ mod tests {
         }
 
         // Test winning
-        room.update(mock_text_message("4b")).await;
+        room.update(mock_text_message("4b").into()).await;
         assert!(matches!(room.state, RoomState::End(_)));
         if let RoomState::End(end_state) = room.state {
             assert_eq!(end_state.last, GameModeRef::Assist);
@@ -1154,7 +1259,7 @@ mod tests {
         }));
 
         // Any grade will now trigger the next `guess()` call, which will be None
-        room.update(mock_text_message("0b 0c")).await;
+        room.update(mock_text_message("0b 0c").into()).await;
 
         assert!(matches!(room.state, RoomState::End(_)));
         if let RoomState::End(end_state) = room.state {
@@ -1175,7 +1280,8 @@ mod tests {
         });
 
         // Test "Play Again"
-        room.update(mock_button_message(PLAY_AGAIN_CALLBACK)).await;
+        room.update(mock_button_message(PLAY_AGAIN_CALLBACK).into())
+            .await;
         assert!(matches!(&room.state, RoomState::Game(GameMode::HvB(_))));
         if let RoomState::Game(GameMode::HvB(hvb)) = &room.state {
             assert!(hvb.bot.0.history().is_empty());
@@ -1190,7 +1296,7 @@ mod tests {
         });
 
         // Test "Main Menu"
-        room.update(mock_button_message(END_MAINMENU_CALLBACK))
+        room.update(mock_button_message(END_MAINMENU_CALLBACK).into())
             .await;
         assert!(matches!(room.state, RoomState::Start));
     }
@@ -1225,7 +1331,8 @@ mod tests {
 
         // Now, advance the game. Bot A will make a guess. Bot B will then guess "1234" and win.
         // The solver logic should now have more than enough info to deduce "1234"
-        room.update(mock_button_message(BVB_NEXT_CALLBACK)).await;
+        room.update(mock_button_message(BVB_NEXT_CALLBACK).into())
+            .await;
 
         assert!(matches!(room.state, RoomState::End(_)));
         if let RoomState::End(end_state) = room.state {

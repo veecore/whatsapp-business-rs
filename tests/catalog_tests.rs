@@ -1,17 +1,22 @@
 mod common;
 
+#[cfg(feature = "test-mode")]
 use common::*;
+#[cfg(feature = "test-mode")]
 use serde_json::json;
+#[cfg(feature = "test-mode")]
 use whatsapp_business_rs::{
     Client, Fields,
     catalog::{MetaProductRef, Price, ProductData, ProductDataField},
 };
+#[cfg(feature = "test-mode")]
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{bearer_token, body_json, method, path, query_param_contains},
 };
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_create_product_success() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -55,6 +60,7 @@ async fn test_create_product_success() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_list_products_with_metadata() {
     let mock_server = MockServer::start().await;
 
@@ -105,6 +111,7 @@ async fn test_list_products_with_metadata() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_update_product_by_id_success() {
     let mock_server = MockServer::start().await;
     // Arrange

@@ -158,7 +158,7 @@ impl StartAction {
 
     /// "View" function: Sends the main menu message.
     #[inline]
-    pub async fn send_hello(msg: &IncomingMessage) {
+    pub async fn send_hello(msg: &Chat) {
         let body = "Hey there! 👋 Welcome to Bulls & Cows! 🐂🐄
 
 It's a classic code-breaking game where you try to guess a secret 4-digit number.
@@ -178,7 +178,7 @@ Ready to play? Pick a mode to get started!";
     }
 
     #[inline]
-    pub async fn send_learn_more(msg: &IncomingMessage) {
+    pub async fn send_learn_more(msg: &Chat) {
         let body =
 "*How to Play Bulls & Cows* 📜
 
@@ -212,7 +212,7 @@ You win by getting *4 Deads*!
 
     /// "View" function: Sends a parse error message.
     #[inline]
-    pub async fn reply_invalid(msg: &IncomingMessage, err: Error) {
+    pub async fn reply_invalid(msg: &Chat, err: Error) {
         try_reply!(msg.reply(err.to_string()).await);
     }
 }
@@ -250,13 +250,13 @@ impl BvbAction {
     /// Sends an invalid message, but "on" `GameRoomAction`.
     /// This means the error message will *also* have the generic "help/menu" buttons.
     #[inline]
-    pub async fn reply_invalid(msg: &IncomingMessage, err: Error) {
+    pub async fn reply_invalid(msg: &Chat, err: Error) {
         GameRoomAction::reply_on(msg, err.to_string()).await;
     }
 
     /// Sends the BvB help message, also "on" `GameRoomAction`.
     #[inline]
-    pub async fn send_help(msg: &IncomingMessage) {
+    pub async fn send_help(msg: &Chat) {
         let text = "This is *Bot vs Bot* mode 🤖💥🤖
 
 Sit back, relax, and tap '▶️ Next Turn' to watch two bots battle it out!
@@ -272,7 +272,7 @@ You can also use these commands:
     /// This is useful because the reply is built in stages and can have
     /// different final forms (A wins, B wins, or continue).
     #[inline]
-    pub fn reply(msg: &'_ IncomingMessage) -> BvbActionResponseBuilder<'_> {
+    pub fn reply(msg: &'_ Chat) -> BvbActionResponseBuilder<'_> {
         BvbActionResponseBuilder { msg, a: (), b: () }
     }
 }
@@ -281,7 +281,7 @@ You can also use these commands:
 /// The generic types `A` and `B` use the "type state" pattern to track
 /// what information has been added. `()` means "not yet set".
 pub struct BvbActionResponseBuilder<'a, A = (), B = ()> {
-    msg: &'a IncomingMessage,
+    msg: &'a Chat,
     a: A,
     b: B,
 }
@@ -526,13 +526,13 @@ impl HvbAction {
 
     /// "View" function: Sends an invalid parse error.
     #[inline]
-    pub async fn reply_invalid(msg: &IncomingMessage, err: Error) {
+    pub async fn reply_invalid(msg: &Chat, err: Error) {
         GameRoomAction::reply_on(msg, err.to_string()).await;
     }
 
     /// "View" function: Replies with user's score and bot's new guess (manual grade path).
     #[inline]
-    pub async fn send_grade_n_call(msg: &IncomingMessage, user_grade: GradeAction, call: Call) {
+    pub async fn send_grade_n_call(msg: &Chat, user_grade: GradeAction, call: Call) {
         let (grade, user_guess) = (
             user_grade.grade,
             user_grade
@@ -557,7 +557,7 @@ My turn! I'm guessing `{call}`. How did I do?"
     /// "View" function: Replies with both scores (auto-grade path).
     #[inline]
     pub async fn send_grade_n_call_n_grade_myself(
-        msg: &IncomingMessage,
+        msg: &Chat,
         user_grade: GradeAction,
         bot_grade: GradeAction,
     ) {
@@ -586,7 +586,7 @@ Your turn!
 
     /// "View" function: Confirms the user's password has been set.
     #[inline]
-    pub async fn send_user_password_saved(msg: &IncomingMessage, password: Password) {
+    pub async fn send_user_password_saved(msg: &Chat, password: Password) {
         GameRoomAction::reply_on(
             msg,
             format!(
@@ -601,11 +601,7 @@ Now you only need to send your guesses. I'll handle scoring my own moves automat
     // TODO: Set new logic
     /// "View" function: Asks for confirmation when changing a password.
     #[inline]
-    pub async fn send_user_password_already_saved(
-        msg: &IncomingMessage,
-        former: Password,
-        new: Password,
-    ) {
+    pub async fn send_user_password_already_saved(msg: &Chat, former: Password, new: Password) {
         GameRoomAction::reply_on(
             msg,
             format!(
@@ -619,7 +615,7 @@ If so, send `set {new}` again to confirm."
 
     /// "View" function: Tells the user not to grade manually when auto-grade is on.
     #[inline]
-    pub async fn send_user_grade_not_needed(msg: &IncomingMessage) {
+    pub async fn send_user_grade_not_needed(msg: &Chat) {
         GameRoomAction::reply_on(
             msg,
             "No need to grade me! Since you've set your password, I can score myself. Just send your next guess.".to_string(),
@@ -628,7 +624,7 @@ If so, send `set {new}` again to confirm."
     }
 
     #[inline]
-    pub async fn send_promt_user_to_call(msg: &IncomingMessage, bot_grade: Grade) {
+    pub async fn send_promt_user_to_call(msg: &Chat, bot_grade: Grade) {
         // --- Get commentary for the bot's score ---
         let commentary = Self::bot_commentary(bot_grade);
 
@@ -641,7 +637,7 @@ If so, send `set {new}` again to confirm."
 
     /// "View" function (Error): User tried to guess when they needed to grade.
     #[inline]
-    pub async fn send_last_call_not_graded(msg: &IncomingMessage, call: Call) {
+    pub async fn send_last_call_not_graded(msg: &Chat, call: Call) {
         GameRoomAction::reply_on(
             msg,
             format!("Whoa there! ✋ You haven't scored my last guess of `{call}` yet. Please score it before making your next guess."),
@@ -651,7 +647,7 @@ If so, send `set {new}` again to confirm."
 
     /// "View" function (Error): User tried to grade an old guess.
     #[inline]
-    pub async fn send_target_unsupported(msg: &IncomingMessage, last_call: Call) {
+    pub async fn send_target_unsupported(msg: &Chat, last_call: Call) {
         GameRoomAction::reply_on(
             msg,
             format!("Sorry, I can only accept a grade for my most recent guess, which was `{last_call}`."),
@@ -660,7 +656,7 @@ If so, send `set {new}` again to confirm."
 
     /// "View" function (Error): User tried to grade when it wasn't the bot's turn.
     #[inline]
-    pub async fn send_is_not_bot_turn(msg: &IncomingMessage) {
+    pub async fn send_is_not_bot_turn(msg: &Chat) {
         GameRoomAction::reply_on(
             msg,
             "I haven't made a guess yet! It's your turn to guess first.",
@@ -671,7 +667,7 @@ If so, send `set {new}` again to confirm."
     /// "View" function: Sends the human win message.
     #[inline]
     pub fn send_human_wins(
-        msg: &IncomingMessage,
+        msg: &Chat,
         rounds: usize,
         password: Password,
     ) -> impl Future<Output = ()> + Send {
@@ -718,7 +714,7 @@ If so, send `set {new}` again to confirm."
 
     /// "View" function: Bot wins.
     #[inline]
-    pub async fn send_bot_wins(msg: &IncomingMessage) {
+    pub async fn send_bot_wins(msg: &Chat) {
         try_reply!(
             msg.reply("🤖 I win! That was a fun game. Thanks for playing!")
                 .await
@@ -727,13 +723,13 @@ If so, send `set {new}` again to confirm."
 
     /// "View" function (Error): A contradiction was found in the user's grades.
     #[inline]
-    pub async fn send_discrepancy(msg: &IncomingMessage) {
+    pub async fn send_discrepancy(msg: &Chat) {
         try_reply!(msg.reply("🤔 Hmmm, something's not right. Based on your scores, I have no possible numbers left. One of the scores you gave me must have been incorrect.").await);
     }
 
     /// "View" function: Welcome message for HvB.
     #[inline]
-    pub async fn send_welcome(msg: &IncomingMessage) {
+    pub async fn send_welcome(msg: &Chat) {
         GameRoomAction::reply_on(
             msg,
             "Alright, I've picked my secret number. Let the game begin! 🚀
@@ -745,7 +741,7 @@ What's your first guess?",
 
     /// "View" function: Help text for HvB.
     #[inline]
-    pub async fn send_help(msg: &IncomingMessage) {
+    pub async fn send_help(msg: &Chat) {
         let text = "*How to Play Human vs Bot* 🙂
 
 1. Think of your own secret 4-digit number (with unique digits).
@@ -938,7 +934,7 @@ impl AssistAction {
 
     /// "View" function: Replies with the next suggested guess.
     #[inline]
-    pub async fn reply_next(msg: &IncomingMessage, last_grade: Grade, assist: Call) {
+    pub async fn reply_next(msg: &Chat, last_grade: Grade, assist: Call) {
         // Re-use the commentary from HvbAction.
         let comment = HvbAction::bot_commentary(last_grade);
         let text = format!(
@@ -949,7 +945,7 @@ impl AssistAction {
 
     /// "View" function: Sends the win message.
     #[inline]
-    pub async fn send_human_wins(msg: &IncomingMessage, rounds: usize) {
+    pub async fn send_human_wins(msg: &Chat, rounds: usize) {
         let message = Self::get_win_message(rounds);
         try_reply!(msg.reply(message).await);
     }
@@ -981,13 +977,13 @@ impl AssistAction {
 
     /// "View" function: Sends an invalid parse error.
     #[inline]
-    pub async fn reply_invalid(msg: &IncomingMessage, err: Error) {
+    pub async fn reply_invalid(msg: &Chat, err: Error) {
         GameRoomAction::reply_on(msg, err.to_string()).await;
     }
 
     /// "View" function: Sends the welcome message for Assist Mode.
     #[inline]
-    pub async fn send_welcome(msg: &IncomingMessage, first_call: Call) {
+    pub async fn send_welcome(msg: &Chat, first_call: Call) {
         GameRoomAction::reply_on(
             msg,
             format!(
@@ -1000,7 +996,7 @@ Your first guess should be `{first_call}`."
     }
 
     #[inline]
-    pub async fn send_help(msg: &IncomingMessage) {
+    pub async fn send_help(msg: &Chat) {
         let text = "*How to Use Assist Mode* 🤔
 
 In this mode, I'm your secret weapon!
@@ -1021,7 +1017,7 @@ You can also use these commands:
     }
 
     #[inline]
-    pub async fn send_discrepancy(msg: &IncomingMessage) {
+    pub async fn send_discrepancy(msg: &Chat) {
         try_reply!(msg.reply("Uh oh, I'm stumped! 🤯 Based on the scores you've provided, there are no possible numbers left. Your opponent might have made a mistake in scoring one of your guesses.").await);
     }
 }
@@ -1060,7 +1056,7 @@ impl EndAction {
     }
 
     #[inline]
-    pub async fn send_end_prompt(msg: &IncomingMessage, game: GameMode) {
+    pub async fn send_end_prompt(msg: &Chat, game: GameMode) {
         let body = "That was a great round! 🤩 What's next?";
         let play_again_text = match game {
             GameMode::BvB => "🤖 Play Again",
@@ -1078,7 +1074,7 @@ impl EndAction {
     }
 
     #[inline]
-    pub async fn send_end_prompt_suggest_win(msg: &IncomingMessage, game: GameMode) {
+    pub async fn send_end_prompt_suggest_win(msg: &Chat, game: GameMode) {
         let body = "Excellent game! Want to share your victory or play another round?";
         let play_again_text = match game {
             GameMode::BvB => "🤖 Play Again",
@@ -1105,14 +1101,14 @@ impl EndAction {
     }
 
     #[inline]
-    pub async fn send_share_win(msg: &IncomingMessage, win_msg: impl Display) {
+    pub async fn send_share_win(msg: &Chat, win_msg: impl Display) {
         // Adding text causes confusion
         // let share_text = format!("👇 Copy or forward this message to share your win! 👇\n\n{win_msg}");
         try_reply!(msg.reply(win_msg.to_string()).await);
     }
 
     #[inline]
-    pub async fn reply_invalid(msg: &IncomingMessage, err: Error) {
+    pub async fn reply_invalid(msg: &Chat, err: Error) {
         try_reply!(msg.reply(err.to_string()).await);
     }
 }
@@ -1160,7 +1156,7 @@ impl GameRoomAction {
     /// This is the "mounting" pattern.
     // NOTE: Max of 1 button must be on draft
     #[inline]
-    async fn reply_on(msg: &IncomingMessage, draft: impl OutgoingMessage) {
+    async fn reply_on(msg: &Chat, draft: impl OutgoingMessage) {
         // Add buttons
         let draft = draft
             .into_draft()
@@ -1169,6 +1165,69 @@ impl GameRoomAction {
             // FIXME: Better as button
             .footer("💡 Help");
         try_reply!(msg.reply(draft).await);
+    }
+}
+
+#[cfg(feature = "sudo")]
+pub enum SudoAction {
+    Help,
+    CountRooms { filter: CountRoomFilter },
+}
+
+#[cfg(feature = "sudo")]
+pub enum CountRoomFilter {
+    // Rooms in game mode
+    InGame,
+    JustStarting,
+    Ended,
+    All,
+}
+
+#[cfg(feature = "sudo")]
+impl SudoAction {
+    /// Parses a message for generic commands.
+    #[inline]
+    pub fn parse(msg: &IncomingMessage) -> Option<Self> {
+        if let Some(text) = msg.text_body() {
+            let lower = text.to_lowercase();
+            if lower.contains("help") {
+                Some(Self::Help)
+            } else {
+                let (count_room, filter) = text.split_once(" ")?;
+                if count_room != "count_room" {
+                    return None;
+                }
+                Some(match filter {
+                    "in_game" => Self::CountRooms {
+                        filter: CountRoomFilter::InGame,
+                    },
+                    "just_starting" => Self::CountRooms {
+                        filter: CountRoomFilter::JustStarting,
+                    },
+                    "ended" => Self::CountRooms {
+                        filter: CountRoomFilter::Ended,
+                    },
+                    "all" => Self::CountRooms {
+                        filter: CountRoomFilter::All,
+                    },
+                    _ => return None,
+                })
+            }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub async fn send_help(msg: &Chat) {
+        let text = "Send 'count_room <filter>' where filter is one of 'in_game', 'just_starting', 'ended', or 'all'.";
+        try_reply!(msg.reply(text).await)
+    }
+
+    #[inline]
+    pub async fn send_count(msg: &Chat, count: usize) {
+        let text = format!("There are {count} room(s) according to your filter.");
+        try_reply!(msg.reply(text).await)
     }
 }
 
@@ -1220,6 +1279,68 @@ fn make_chat_url(msg: &IncomingMessage) -> String {
         .as_ref()
         .unwrap_or(&msg.recipient.phone_id);
     format!("https://wa.me/{phone}?text=Hi")
+}
+
+#[cfg(not(feature = "batch_server"))]
+pub type Chat = IncomingMessage;
+
+#[cfg(feature = "batch_server")]
+use whatsapp_business_rs::{client::SendMessage, message::MessageCreate};
+
+// A more advanced replacement for simply using IncomingMessage
+#[cfg(feature = "batch_server")]
+pub struct Chat {
+    msg: IncomingMessage,
+    batch_client: crate::batch_server::BatchClient,
+    // If too much time passed before we could reply, swipe reply to target
+    // actual message... This might be a bit off... The batch server would
+    // still stall.
+}
+
+#[cfg(feature = "batch_server")]
+impl std::ops::Deref for Chat {
+    type Target = IncomingMessage;
+
+    fn deref(&self) -> &Self::Target {
+        &self.msg
+    }
+}
+
+#[cfg(feature = "batch_server")]
+impl Chat {
+    fn reply<'a>(
+        &'a self,
+        draft: impl OutgoingMessage,
+    ) -> impl Future<Output = Result<MessageCreate, Box<dyn std::error::Error>>> + 'a {
+        let message_request = self.msg.reply(draft);
+
+        // The recipient_id(String) is not too big to clone to make message_request 'static
+        // but that'd eventually require us to manage Client and more logic IncomingMessage
+        // already handled. But here, we don't clone nor handle reply logic.
+        //
+        // SAFETY: We'd wait till the response is got from the batch-server, so the
+        // recipient_id used by `message_request` will not be dropped until then.
+        let static_message_request: SendMessage<'static> =
+            unsafe { std::mem::transmute(message_request) };
+
+        // This does NOT send anything.
+        // It just creates a future. No task is scheduled.
+        let schedule_request_fut = self.batch_client.clone().send(static_message_request);
+
+        async {
+            let wait_till_response_fut = schedule_request_fut.await;
+            match wait_till_response_fut.await {
+                Ok(result) => result.map_err(|err| Box::new(err) as _),
+                Err(receive_error) => {
+                    Err(format!("Error receiving result from batch_server: {receive_error}").into())
+                }
+            }
+        }
+    }
+
+    pub fn new(msg: IncomingMessage, batch_client: crate::batch_server::BatchClient) -> Self {
+        Self { msg, batch_client }
+    }
 }
 
 // --- Unit Tests for the Parser ---

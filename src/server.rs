@@ -925,24 +925,21 @@ pub struct ConversationInfo {
     pub expiration_timestamp: Option<Timestamp>,
 }
 
-derive! {
-    /// Pricing metadata for a WhatsApp message
-    #[derive(#AnyField, Clone, Debug)]
-    #[non_exhaustive]
-    pub struct MessagePricing {
-        /// What type of conversation this falls under
-        #![anyfield("category", "conversation_origin")]
-        #![serde(default)]
-        pub conversation_origin: Option<ConversationOrigin>,
+/// Pricing metadata for a WhatsApp message
+#[derive(Deserialize, Clone, Debug)]
+#[non_exhaustive]
+pub struct MessagePricing {
+    /// What type of conversation this falls under
+    #[serde(alias = "category", default)]
+    pub conversation_origin: Option<ConversationOrigin>,
 
-        /// Whether this message is billable
-        #![serde(default)]
-        pub billable: Option<bool>,
+    /// Whether this message is billable
+    #[serde(default)]
+    pub billable: Option<bool>,
 
-        /// Pricing model name (e.g. "CBP")
-        #![serde(default)]
-        pub pricing_model: Option<String>,
-    }
+    /// Pricing model name (e.g. "CBP")
+    #[serde(default)]
+    pub pricing_model: Option<String>,
 }
 
 /// The type of conversation being billed

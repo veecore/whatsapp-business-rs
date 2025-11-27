@@ -6,9 +6,16 @@ edition = "2024"
 # TODO: Update paths
 [dependencies]
 whatsapp-business-rs = {path = "../../../whatsapp-business-rs", features = ["incoming_message_ext"]}
+# call-n-said = { git = "https://github.com/veecore/call-n-said", branch = "main", subdir = "call-n-said" }
+
 call-n-said = {path = "../../../call-n-said/call-n-said"}
 regex = "1.12.2"
 dashmap = "6.1.0"
 tokio = "1.48.0"
 dotenvy = "0.15.7"
 rand = "0.9.2"
+
+[features]
+default = ["sudo"]
+batch_server = []
+sudo = []

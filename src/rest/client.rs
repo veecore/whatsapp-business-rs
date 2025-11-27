@@ -518,6 +518,22 @@ pub(crate) struct PendingMessagePayload<'t> {
     content: PendingContentPayload,
 }
 
+impl PendingMessagePayload<'_> {
+    #[inline]
+    pub(crate) fn into_static(self) -> PendingMessagePayload<'static> {
+        PendingMessagePayload {
+            messaging_product: self.messaging_product,
+            biz_opaque_callback_data: self.biz_opaque_callback_data,
+            to: Cow::Owned(match self.to {
+                Cow::Borrowed(to) => to.clone(),
+                Cow::Owned(to) => to,
+            }),
+            context: self.context,
+            content: self.content,
+        }
+    }
+}
+
 impl<'t> IntoMessageRequestOutput for PendingMessagePayload<'t> {
     type Request = MessagePayload<'t>;
 
@@ -932,6 +948,7 @@ pub(crate) struct MediaUploadResponse {
 // Text request structures
 #[derive(Deserialize, Serialize, Debug)]
 pub(crate) struct TextRequest {
+    #[serde(alias = "text")]
     pub(crate) body: String,
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -971,7 +988,7 @@ pub(crate) fn serialize_text_text_opt<S: Serializer>(
     }
 }
 
-// FIXME: Still can't benefit from AnyField
+// FIXME: Still can't benefit from serde alias due to serialize
 impl<'de> Deserialize<'de> for Text {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

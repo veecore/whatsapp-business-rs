@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.5.0] - 2025-11-27
+
+This release focuses heavily on Developer Experience (DX), adding numerous Quality-of-Life (QoL) builders to `Draft` for creating common message types quickly, and includes a critical fix for using the Batch client with non-static handlers.
+
+## 🚀 Features
+
+* **`Draft` QoL Builders:** Added several fluent helper methods to `Draft` to simplify message creation:
+    * `react()`: Quick shortcut for creating `Reaction` messages.
+* **Interactive Builders:**
+    * `with_cta_url()`: Fluent builder for creating an Interactive message with a Call-to-Action URL button.
+* **Async/Concurrency Improvement:**
+    * `SendMessage::into_static()`: Enables the safe use of `SendMessage` within background tasks (e.g., `tokio::spawn`) by converting all borrowed data to owned data.
+
+## 🛠 Fixes
+
+* **Batch Execution Lifetime:** Removed the unnecessary `'static` bound constraint from `BatchExecute::execute()`. This fix is crucial for allowing `BatchExecute` to work correctly with handlers that borrow data from the calling scope, preventing lifetime errors in real-world usage.
+* **Batch Size Hint:** Corrected the upper bound for `size_hint` on the empty `Requests` tuple (`()`) from `(0, None)` to `(0, Some(0))`.
+
+## ✨ Improvements
+
+* **`Draft` Inspection:** Added `Draft::count_buttons()` to help validate interactive messages against Meta's button limits.
+* **Location API Refinement:** Refactored the `Draft::location()` API to be more chainable with new `location_name()` and `location_address()` methods.
+* **Internal Cleanup:** Added `#[doc(hidden)]` to `Requests::size_hint` as it is an internal implementation detail.
+
+----------
+
 ## [0.4.2] - 2025-10-31
 
 ### 🧰 Maintenance

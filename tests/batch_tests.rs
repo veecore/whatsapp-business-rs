@@ -1,14 +1,19 @@
 mod common;
 
+#[cfg(feature = "test-mode")]
 use common::*;
+#[cfg(feature = "test-mode")]
 use serde_json::json;
+#[cfg(feature = "test-mode")]
 use whatsapp_business_rs::{Client, message::Media};
+#[cfg(feature = "test-mode")]
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{bearer_token, body_string_contains, method, path},
 };
 
 /// A helper matcher to verify that a specific sub-request is present in the batch JSON payload.
+#[cfg(feature = "test-mode")]
 fn contains_sub_request(method: &str, relative_url: &str) -> impl wiremock::Match + 'static {
     body_string_contains(format!(
         r#""method":"{}","relative_url":"{}""#,
@@ -16,6 +21,7 @@ fn contains_sub_request(method: &str, relative_url: &str) -> impl wiremock::Matc
     ))
 }
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_simple_batch_execution() {
     let mock_server = MockServer::start().await;
 
@@ -82,6 +88,7 @@ async fn test_simple_batch_execution() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_batch_with_file_upload() {
     let mock_server = MockServer::start().await;
 
@@ -144,6 +151,7 @@ async fn test_batch_with_file_upload() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_batch_with_headers_and_auth_override() {
     let mock_server = MockServer::start().await;
     // Arrange
@@ -191,6 +199,7 @@ async fn test_batch_with_headers_and_auth_override() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-mode")]
 async fn test_batch_with_partial_failure() {
     let mock_server = MockServer::start().await;
     // Arrange
